@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*_prompts.md
+ma_prompt.md
+.env
+
+# The secret-scanner fixture must be committed even though .env is ignored.
+!test_targets/secrets/.env

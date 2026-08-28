@@ -1,0 +1,15 @@
+# VibeSec dependencies
+#
+# Install with:  python -m pip install -r requirements.txt
+#
+# IMPORTANT on Windows: pip installs the `semgrep` and `pysemgrep` executables into
+# Python's Scripts directory, which is often not on PATH. scanner.py locates that
+# directory itself, so you don't strictly need to fix PATH -- but if you want to run
+# `semgrep` by hand from a terminal, add this to your PATH:
+#     C:\Users\<you>\AppData\Roaming\Python\Python3XX\Scripts
+#
+# Do NOT use `python -m semgrep`. That entrypoint was deprecated in semgrep 1.38.0
+# and no longer runs a scan at all -- it prints a warning and exits with code 2.
+
+semgrep>=1.100.0
+anthropic>=0.40.0

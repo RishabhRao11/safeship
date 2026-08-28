@@ -1,0 +1,13 @@
+# Planted fixture: versions an LLM might suggest from memory, all long superseded.
+requests==2.19.1
+flask==0.12.2
+pyyaml==5.1
+urllib3==1.24.1
+jinja2==2.10
+cryptography==2.3
+
+# Should be fine.
+python-dateutil==2.9.0
+
+# Unpinned: deliberately skipped, we cannot know what is installed.
+rich>=13.0.0

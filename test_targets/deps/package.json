@@ -1,0 +1,12 @@
+{
+  "name": "vibesec-deps-fixture",
+  "version": "1.0.0",
+  "dependencies": {
+    "lodash": "4.17.15",
+    "minimist": "1.2.0",
+    "axios": "0.21.0"
+  },
+  "devDependencies": {
+    "jest": "29.7.0"
+  }
+}
