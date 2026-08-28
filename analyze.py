@@ -225,6 +225,29 @@ def config_explanation(finding):
     }
 
 
+SCANNER_SEVERITY = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
+
+
+def scanner_explanation(finding):
+    """Build a record for a Semgrep finding when the API is not being called.
+
+    Used by --no-explain. The severity deliberately tops out at "high", never
+    "critical": Semgrep grades the *pattern*, and whether the pattern is actually
+    reachable with attacker input is the judgment the explainer exists to make.
+    Printing "critical" for something nobody has assessed would be inventing
+    confidence we do not have.
+    """
+    extra = finding.get("extra", {})
+    return {
+        "is_real_vulnerability": True,
+        "severity": SCANNER_SEVERITY.get(extra.get("severity"), "medium"),
+        "what_it_is": clean_rule_id(finding.get("check_id", "Finding")),
+        "attacker_scenario": (extra.get("message") or "").strip(),
+        "fix": "",
+        "explained_by": "scanner",
+    }
+
+
 def clean_rule_id(check_id):
     """Shorten Semgrep's rule ID for display.
 
@@ -639,14 +662,6 @@ def main():
         file=sys.stderr,
     )
 
-    if args.no_explain:
-        for finding in findings:
-            line = finding.get("start", {}).get("line", "?")
-            sev = finding.get("extra", {}).get("severity", "?")
-            where = f"{display_path(finding.get('path', ''), args.target)}:{line}"
-            print(f"  [{sev:>7}] {where}  {clean_rule_id(finding.get('check_id', '?'))}")
-        return
-
     # --- Step 2 & 3: snippet + explain -------------------------------------
     # Source files are cached by path. A directory scan routinely puts several
     # findings in one file, and re-reading it per finding is wasted work.
@@ -691,6 +706,11 @@ def main():
             results.append(record)
             continue
 
+        if args.no_explain:
+            record["explanation"] = scanner_explanation(finding)
+            results.append(record)
+            continue
+
         if client is None:
             client = anthropic_client()
 
@@ -726,6 +746,15 @@ def main():
     if args.json:
         print(json.dumps(results, indent=2))
         return
+
+    if args.no_explain:
+        # Compact listing: the findings exist, but nothing has judged them.
+        for record in results:
+            severity = record["explanation"].get("severity", "?")
+            print(f"  [{severity:>8}] {record['path']}:{record['line']}"
+                  f"  {clean_rule_id(record['check_id'])}")
+        return
+
     print_report(results, args.target, scan_count, len(findings))
 
 

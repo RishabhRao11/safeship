@@ -1,0 +1,39 @@
+{
+  "name": "vibesec",
+  "version": "0.1.0",
+  "description": "Security scanner for vibe-coded projects. Finds leaked credentials, known-vulnerable dependencies, insecure configuration, and injection bugs in AI-generated Python and JavaScript.",
+  "bin": {
+    "vibesec": "bin/vibesec.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT",
+  "keywords": [
+    "security",
+    "scanner",
+    "sast",
+    "secrets",
+    "cve",
+    "semgrep",
+    "nextjs",
+    "express",
+    "vibecoding"
+  ],
+  "files": [
+    "bin/",
+    "engines/",
+    "rules/",
+    "analyze.py",
+    "scanner.py",
+    "explainer.py",
+    "report.py",
+    "requirements.txt",
+    "README.md",
+    "!**/__pycache__",
+    "!**/*.pyc"
+  ],
+  "scripts": {
+    "doctor": "node bin/vibesec.js doctor"
+  }
+}

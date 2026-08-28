@@ -69,6 +69,7 @@ what:
 | `engines/config.py` | Insecure config, 22 rules + 2 absence checks | Works, 22/22 on fixtures |
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
 | `report.py` | Findings → one self-contained HTML file | Works |
+| `bin/vibesec.js` | npx CLI: preflight, then runs the scan locally | Works |
 | `rules/vibe_patterns.yaml` | 7 Python rules | Works, 7/7 |
 | `rules/vibe_patterns_js.yaml` | 7 JS/TS rules | Works, 11/11 |
 | `explainer.py` | Claude explains a Semgrep finding | **Never run — needs credits** |
@@ -134,6 +135,15 @@ specifically to prove we don't flag it.
 ---
 
 ## Running it
+
+```bash
+# As a user would, once published:
+npx vibesec scan            # scan .
+npx vibesec doctor          # check Python + Semgrep are present
+
+# Locally, before publishing:
+node bin/vibesec.js scan ./someproject --no-explain
+```
 
 ```bash
 # Everything. Needs an API key only for the Semgrep findings.
@@ -206,6 +216,26 @@ push on pattern shape alone — allowlist the paths rather than weakening them.
   negative test is a false positive waiting to ship.
 - **Ask before adding files.** This repo accumulated scaffolding fast once before.
 
+## The npx wrapper
+
+`npx` reaches the audience that ships AI-built products — Next.js and Express —
+and needs no install step. The core is Python because Semgrep is Python, and
+that combination has exactly one honest failure mode: npx promises zero-install
+and then hits a missing interpreter. So `bin/vibesec.js` checks Python (3.9+,
+trying `py -3` first on Windows) and Semgrep before doing anything, and names
+what to install. `vibesec doctor` runs the same checks alone.
+
+Two things that were wrong and are easy to reintroduce:
+
+- **Do not set `cwd` on the spawn.** An earlier version used `cwd: ROOT`, which
+  made `npx vibesec scan .` scan the installed package instead of the user's
+  project. Python puts the script's own directory on `sys.path`, so imports
+  resolve without it. The target is resolved to an absolute path for the same
+  reason.
+- **`files` in package.json is an allowlist, but a listed directory pulls in
+  everything under it** — including `__pycache__`. `test_targets/` is excluded
+  on purpose: it holds format-valid fake credentials that must never ship.
+
 ## Phase 2 status
 
 Item 4 (report) is done as a single self-contained HTML file rather than React +
@@ -215,11 +245,13 @@ It deviates from the spec in one way worth remembering — "an AI-generated
 explanation for every issue" is not literally true, because three of four engines
 answer without the model.
 
-Item 5 (`npx vibesec scan`) is unstarted, and needs a decision first: an npx CLI
-driving a Python tool means two runtimes and `npx` users hitting "Python not
-found". A Python entry point (`pipx install vibesec` → `vibesec scan`) is the
-honest packaging; the npx wrapper is worth it only if reaching Node-first users
-beats install simplicity.
+Item 5 (`npx vibesec scan`) is done, minus publishing. It runs the scan locally
+rather than zipping and uploading, because there is no server by design — and for
+a tool that hunts credentials, not transmitting your source is a feature.
+
+Still open: nothing is published to npm, and there is no `pyproject.toml`, so
+`pip install vibesec` does not exist either. Publishing needs a license decision
+and a name check on the registry.
 
 Not a web app, not a hosted service, not scanning GitHub URLs. Local-only by
 design.
