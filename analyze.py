@@ -19,6 +19,7 @@ USAGE
     python analyze.py myapp.py --config auto --config rules/vibe_patterns.yaml
     python analyze.py myapp.py --no-explain         # scan only, no API calls
     python analyze.py myproject/ --json             # machine-readable output
+    python analyze.py myproject/ --html report.html # shareable single-file report
 
 WHY THE ORCHESTRATION IS ITS OWN FILE
     scanner.py knows nothing about Claude. explainer.py knows nothing about Semgrep.
@@ -38,6 +39,7 @@ import sys
 from collections import Counter
 
 import explainer
+import report
 import scanner
 # Aliased because `secrets` is also a standard-library module. Importing ours
 # under its bare name would shadow it for the whole file.
@@ -530,6 +532,11 @@ def main():
         action="store_true",
         help="Emit results as JSON instead of the text report.",
     )
+    parser.add_argument(
+        "--html",
+        metavar="PATH",
+        help="Also write a self-contained HTML report to PATH.",
+    )
     args = parser.parse_args()
 
     if args.no_secrets and args.secrets_only:
@@ -634,6 +641,10 @@ def main():
             "line": start_line,
             "engine": finding.get("_engine", "semgrep"),
             "also_matched": finding.get("_also_matched", []),
+            # Carried through so the report can show engine-specific detail --
+            # CVE ids, the redacted credential, whether a file is committed --
+            # without re-running the engine that produced it.
+            "metadata": finding.get("extra", {}).get("metadata", {}),
             "explanation": {},
             "error": None,
         }
@@ -680,6 +691,11 @@ def main():
         results.append(record)
 
     # --- Step 4 & 5: report -------------------------------------------------
+    if args.html:
+        written = report.write(results, args.target, args.html,
+                               scan_count=scan_count, deduped_count=len(findings))
+        print(f"HTML report: {written}", file=sys.stderr)
+
     if args.json:
         print(json.dumps(results, indent=2))
         return

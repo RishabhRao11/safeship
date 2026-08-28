@@ -6,3 +6,7 @@ ma_prompt.md
 
 # The secret-scanner fixture must be committed even though .env is ignored.
 !test_targets/secrets/.env
+
+# Generated scan reports.
+report.html
+*.report.html

@@ -68,6 +68,7 @@ what:
 | `engines/dependencies.py` | OSV.dev CVE lookup, pip + npm | Works, 9/9 on fixtures |
 | `engines/config.py` | Insecure config, 22 rules + 2 absence checks | Works, 22/22 on fixtures |
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
+| `report.py` | Findings → one self-contained HTML file | Works |
 | `explainer.py` | Claude explains a Semgrep finding | **Never run — needs credits** |
 
 Measured on `test_targets/`: 70 raw findings → 61 locations
@@ -111,6 +112,13 @@ reached your history. The config engine does *not*, because that would conflate
 "in version control" with "deployed": `DEBUG = True` is just as dangerous in an
 untracked `settings.py` if that file is what ships.
 
+**The HTML report escapes everything, and that is a security control.** It
+embeds file paths, source lines, credential values, and model output — and model
+output is steerable by a prompt injection in the scanned code. Unescaped, that
+chain ends with the report running an attacker's JavaScript when the analyst
+opens it. `report.py` has no raw-HTML path, and `test_report_escaping.py` exists
+to keep it that way. Run it after any template change.
+
 **Stripe `pk_live_` is deliberately not a secret pattern.** Publishable keys are
 meant to ship in client code. `test_targets/secrets/safe_config.py` contains one
 specifically to prove we don't flag it.
@@ -126,6 +134,9 @@ python analyze.py myproject/ --config auto --config rules/vibe_patterns.yaml
 # No API key, no network, fast:
 python analyze.py myproject/ --no-semgrep --no-deps
 
+# Shareable single-file report, opens from disk, no network:
+python analyze.py myproject/ --html report.html
+
 # Any engine standalone, for isolating which layer misbehaved:
 python engines/secrets.py myproject/ --json
 python engines/dependencies.py myproject/ --json
@@ -133,7 +144,11 @@ python engines/config.py myproject/ --json
 ```
 
 Flags: `--no-semgrep` `--no-secrets` `--no-config` `--no-deps` `--secrets-only`
-`--no-explain` `--no-dedupe` `--json`
+`--no-explain` `--no-dedupe` `--json` `--html PATH`
+
+`report.py` also runs standalone against `--json` output, so the report can be
+iterated on without re-scanning:
+`python analyze.py proj/ --json > f.json && python report.py f.json out.html`
 
 ---
 
@@ -179,7 +194,20 @@ push on pattern shape alone — allowlist the paths rather than weakening them.
   negative test is a false positive waiting to ship.
 - **Ask before adding files.** This repo accumulated scaffolding fast once before.
 
-## Not yet
+## Phase 2 status
 
-Phase 2 is unstarted: no report generator, no dashboard, no `npx` CLI. Not a web
-app, not a hosted service, not scanning GitHub URLs. Local-only by design.
+Item 4 (report) is done as a single self-contained HTML file rather than React +
+a backend endpoint: with no server there is no endpoint to build, and a file a
+user can email is more useful to this audience than one needing `npm install`.
+It deviates from the spec in one way worth remembering — "an AI-generated
+explanation for every issue" is not literally true, because three of four engines
+answer without the model.
+
+Item 5 (`npx vibesec scan`) is unstarted, and needs a decision first: an npx CLI
+driving a Python tool means two runtimes and `npx` users hitting "Python not
+found". A Python entry point (`pipx install vibesec` → `vibesec scan`) is the
+honest packaging; the npx wrapper is worth it only if reaching Node-first users
+beats install simplicity.
+
+Not a web app, not a hosted service, not scanning GitHub URLs. Local-only by
+design.
