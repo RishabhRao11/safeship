@@ -279,6 +279,17 @@ def deduplicate(findings):
     by_location = {}
     for finding in findings:
         location = (finding.get("path", ""), finding.get("start", {}).get("line", 0))
+        metadata = finding.get("extra", {}).get("metadata") or {}
+
+        # Dependency findings are anchored to a manifest line that is frequently
+        # the same for every package: a package.json written on one line gives
+        # every one of them line 1, and this dedupe then keeps exactly one. The
+        # package name is what makes them distinct, so it joins the key. Other
+        # engines anchor to genuinely distinct lines and are left alone, so a
+        # secret and a Semgrep rule firing on one line still collapse.
+        if metadata.get("package"):
+            location = location + (metadata["package"],)
+
         severity = finding.get("extra", {}).get("severity", "INFO")
 
         if location not in by_location:
