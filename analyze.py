@@ -248,6 +248,21 @@ def clean_rule_id(check_id):
     return ".".join(parts[-2:])
 
 
+def _key_path(path):
+    """Canonical path for comparing findings from different engines.
+
+    Semgrep echoes back whatever path it was handed, so a relative target gives
+    relative paths, while every engine in engines/ returns absolute ones. Keying
+    the dedupe on the raw string then compares "test_targets/js/vulnerable.js"
+    against "C:\\...\\test_targets\\js\\vulnerable.js", they never match, and
+    cross-engine duplicates survive -- silently, and only when the target is
+    relative, which is the way people actually invoke it.
+    """
+    if not path:
+        return ""
+    return os.path.normcase(os.path.abspath(path))
+
+
 def deduplicate(findings):
     """Collapse findings that fire on the same line into one.
 
@@ -278,7 +293,8 @@ def deduplicate(findings):
     """
     by_location = {}
     for finding in findings:
-        location = (finding.get("path", ""), finding.get("start", {}).get("line", 0))
+        location = (_key_path(finding.get("path", "")),
+                    finding.get("start", {}).get("line", 0))
         metadata = finding.get("extra", {}).get("metadata") or {}
 
         # Dependency findings are anchored to a manifest line that is frequently
@@ -367,7 +383,7 @@ def _merge_adjacent(findings):
     for finding in findings:
         line = finding.get("start", {}).get("line", 0)
         check_id = finding.get("check_id")
-        path = finding.get("path", "")
+        path = _key_path(finding.get("path", ""))
 
         previous = merged[-1] if merged else None
         if (
@@ -377,7 +393,7 @@ def _merge_adjacent(findings):
             # Same file, too: without this the last finding in one file and the
             # first in the next merge whenever their line numbers happen to be
             # close, which across a directory is often.
-            and previous.get("path", "") == path
+            and _key_path(previous.get("path", "")) == path
             and previous.get("check_id") == check_id
             and line - previous.get("start", {}).get("line", 0) <= ADJACENT_LINE_WINDOW
         ):

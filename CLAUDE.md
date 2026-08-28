@@ -69,10 +69,18 @@ what:
 | `engines/config.py` | Insecure config, 22 rules + 2 absence checks | Works, 22/22 on fixtures |
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
 | `report.py` | Findings → one self-contained HTML file | Works |
+| `rules/vibe_patterns.yaml` | 7 Python rules | Works, 7/7 |
+| `rules/vibe_patterns_js.yaml` | 7 JS/TS rules | Works, 11/11 |
 | `explainer.py` | Claude explains a Semgrep finding | **Never run — needs credits** |
 
-Measured on `test_targets/`: 70 raw findings → 61 locations
-(22 config, 17 secrets, 13 Semgrep, 9 dependencies).
+Measured on `test_targets/`: 87 raw findings → 72 locations.
+
+Custom rules vs the registry alone, per language:
+
+| Fixture | `--config auto` | plus `rules/` |
+|---|---|---|
+| `test_targets/vulnerable.py` | 4/7 | 7/7 |
+| `test_targets/js/vulnerable.js` | 2/11 | 11/11 |
 
 ---
 
@@ -129,7 +137,7 @@ specifically to prove we don't flag it.
 
 ```bash
 # Everything. Needs an API key only for the Semgrep findings.
-python analyze.py myproject/ --config auto --config rules/vibe_patterns.yaml
+python analyze.py myproject/ --config auto --config rules/
 
 # No API key, no network, fast:
 python analyze.py myproject/ --no-semgrep --no-deps
@@ -166,6 +174,8 @@ they are how false-positive regressions get caught.
 | `test_targets/deps/` | 9 vulnerable packages; unpinned + current ones ignored |
 | `test_targets/config/bad/` | 22 issues across Django/Flask/Express/Next.js/Docker |
 | `test_targets/config/good/` | **Zero findings.** Includes commented-out traps and a committed `.env.example` |
+| `test_targets/js/vulnerable.js` | 11 planted vulns, all 7 JS rules fire |
+| `test_targets/js/safe.js` | **Zero findings.** Parameterised query, non-SQL template literal, `eval` on a literal, `pk_live_` |
 
 Fixture credentials are fake but format-valid. GitHub push protection may block a
 push on pattern shape alone — allowlist the paths rather than weakening them.
@@ -179,8 +189,10 @@ push on pattern shape alone — allowlist the paths rather than weakening them.
   `test_targets/mass_assignment.py` it cuts the function signature and the line
   reading the request body, so the model is asked "is this attacker-reachable?"
   without seeing where input comes from. Should extend to the enclosing function.
-- **Semgrep rules only cover Python.** The config engine handles JS/TS config, but
-  no JS/TS dataflow analysis exists.
+- **`metavariable-regex` matches in FULL, it does not search.** A bare
+  `(select|insert)` silently matches nothing; it needs wrapping `.*`. This
+  cost real time — the rule loaded, ran, and quietly found less than it should.
+  Every regex in both rule files is anchored or `.*`-wrapped for this reason.
 
 ---
 
