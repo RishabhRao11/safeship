@@ -70,8 +70,8 @@ what:
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
 | `explainer.py` | Claude explains a Semgrep finding | **Never run — needs credits** |
 
-Measured on `test_targets/`: 68 raw findings → 59 locations
-(20 config, 17 secrets, 13 Semgrep, 9 dependencies).
+Measured on `test_targets/`: 70 raw findings → 61 locations
+(22 config, 17 secrets, 13 Semgrep, 9 dependencies).
 
 ---
 
@@ -96,8 +96,14 @@ a detector. If it's ever added, it belongs behind `--entropy`, off by default.
 
 **Absence checks require three-part evidence.** "Missing rate limiting" fires only
 if a web framework was found AND an auth-shaped route was found AND no rate-limit
-library exists anywhere. All three, or silence. Reported once per project, capped
-at WARNING, and the message says a proxy or CDN doing the job makes it expected.
+library exists anywhere. All three, or silence. Capped at WARNING, and the message
+says a proxy or CDN doing the job makes the finding expected.
+
+**Absence facts are scoped per project, not per scan.** A directory counts as a
+project when it holds a `package.json`, `requirements.txt`, `manage.py`, or
+similar marker; each gets its own fact set. Without this, one service's
+`import helmet` in a monorepo marks the fact true and silently clears the service
+next door that has none.
 
 **Severity means different things per engine, deliberately.** The secrets engine
 downgrades on git exposure — a credential's risk really is a function of whether it
@@ -158,9 +164,6 @@ push on pattern shape alone — allowlist the paths rather than weakening them.
   `test_targets/mass_assignment.py` it cuts the function signature and the line
   reading the request body, so the model is asked "is this attacker-reachable?"
   without seeing where input comes from. Should extend to the enclosing function.
-- **Absence checks are project-wide.** Facts are gathered across the whole scan
-  root, so in a monorepo one service's `helmet` import suppresses the finding for a
-  service that lacks it. Fails quiet, which is the right direction, but it fails.
 - **Semgrep rules only cover Python.** The config engine handles JS/TS config, but
   no JS/TS dataflow analysis exists.
 

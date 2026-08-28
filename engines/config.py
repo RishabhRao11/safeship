@@ -259,6 +259,48 @@ AUTH_ROUTE_SIGNS = re.compile(
 )
 
 
+# Files that mark the root of a self-contained project. Used to scope the facts
+# the absence checks reason over.
+PROJECT_MARKERS = {
+    "package.json", "requirements.txt", "pyproject.toml", "setup.py", "Pipfile",
+    "manage.py", "go.mod", "Cargo.toml", "composer.json", "Gemfile",
+}
+
+
+def project_roots(target):
+    """Normalised directories that each count as one project.
+
+    WHY THIS EXISTS
+        Absence checks used one set of facts for the whole scan. In a monorepo
+        that is wrong in the dangerous direction: an `import helmet` in one
+        service marks the fact true, and the service next door that has no
+        helmet is never reported. Facts have to be scoped to the project they
+        were observed in.
+
+    The scan root is always included, so files that belong to no marked project
+    still have somewhere to go.
+    """
+    if os.path.isfile(target):
+        return [norm_path(os.path.dirname(target) or ".")]
+
+    roots = {norm_path(target)}
+    for dirpath, dirnames, filenames in os.walk(target):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        if any(marker in filenames for marker in PROJECT_MARKERS):
+            roots.add(norm_path(dirpath))
+    # Longest first, so the nearest ancestor wins in _root_for().
+    return sorted(roots, key=len, reverse=True)
+
+
+def _root_for(path, roots):
+    """The nearest ancestor project root for a file."""
+    normalised = norm_path(path)
+    for root in roots:  # already longest-first
+        if normalised.startswith(root + os.sep) or normalised == root:
+            return root
+    return roots[-1] if roots else ""
+
+
 @dataclass
 class ProjectFacts:
     frameworks: set = field(default_factory=set)
@@ -496,9 +538,12 @@ def scan(target):
     if not os.path.exists(target):
         raise ConfigScanError(f"Target does not exist: {target}")
 
-    facts = ProjectFacts()
     findings = []
     tracked = tracked_files(target)
+
+    # One ProjectFacts per project, not one per scan. See project_roots().
+    roots = project_roots(target)
+    facts_by_root = {root: ProjectFacts() for root in roots}
 
     for path in iter_files(target):
         env_finding = _committed_env_finding(path, tracked)
@@ -517,6 +562,8 @@ def scan(target):
         # Computed once per file, not per rule.
         skip_lines = (_docstring_lines(lines)
                       if path.lower().endswith(".py") else frozenset())
+
+        facts = facts_by_root[_root_for(path, roots)]
 
         for lineno, text in enumerate(lines, start=1):
             if len(text) > 2000 or lineno in skip_lines:
@@ -562,7 +609,8 @@ def scan(target):
                     },
                 })
 
-    findings.extend(_absence_findings(facts))
+    for facts in facts_by_root.values():
+        findings.extend(_absence_findings(facts))
     findings.sort(key=lambda f: (f["path"], f["start"]["line"]))
     return findings
 
