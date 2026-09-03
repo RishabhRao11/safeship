@@ -43,12 +43,19 @@ class SecretPattern:
     remediation: str
     secret_group: int = 0    # which capture group holds the credential itself
     confidence: str = "high"
+    # When set, the rule applies only to files whose basename matches. Used to
+    # keep env-file syntax rules away from source code, where the same shape
+    # means something entirely different.
+    filename_re: object = None
 
 
 def _p(id, name, severity, pattern, remediation, secret_group=0,
-       confidence="high", flags=0):
-    return SecretPattern(id, name, severity, re.compile(pattern, flags),
-                         remediation, secret_group, confidence)
+       confidence="high", flags=0, filename_re=None):
+    return SecretPattern(
+        id, name, severity, re.compile(pattern, flags), remediation,
+        secret_group, confidence,
+        re.compile(filename_re, re.IGNORECASE) if filename_re else None,
+    )
 
 
 # Ordered roughly by how badly a leak hurts. Every regex here is anchored to a
@@ -172,18 +179,52 @@ PATTERNS = [
        "account it names.",
        secret_group=1),
 
-    # The catch-all. Deliberately WARNING, not ERROR: it matches a naming convention
-    # rather than a credential format, so _looks_like_placeholder() below does most
-    # of the real work in keeping it usable.
+    # The catch-all, in two halves. Deliberately WARNING, not ERROR: it matches a
+    # naming convention rather than a credential format.
+    #
+    # WHY THE VALUE MUST BE QUOTED HERE
+    #   The first version accepted unquoted values so it could read .env syntax
+    #   (API_KEY=abc123). Run against 12,775 files of real third-party code that
+    #   produced 554 false positives and 8 true ones -- because in a *code* file an
+    #   unquoted value is a reference, not a credential:
+    #       api_key=resolved_api_key,
+    #       api_key_env_vars: Sequence[str] = (...)
+    #   Every one of those is the correct pattern being flagged as the bug. None of
+    #   the 554 were in a .env file.
+    #
+    #   So quoted values are matched everywhere, and the unquoted form is scoped to
+    #   the env-style files where it is the actual syntax. Fixtures never caught
+    #   this: they were all written as NAME = "literal".
     _p("generic-assigned-secret", "Hardcoded credential", "WARNING",
        # The leading class includes quotes so JSON and YAML keys match too:
        # `"api_key": "..."` has a quote immediately before the name.
        r"(?:^|[\s{,;(\"'])(?:export\s+)?"
        r"([A-Za-z0-9_.\-]*(?:api[_\-]?key|apikey|secret|token|password|passwd|pwd)"
        r"[A-Za-z0-9_.\-]*)"
-       r"\s*[:=]\s*[\"']?([^\"'\s,;)}\n]{8,})[\"']?",
+       # The optional quote before [:=] closes a JSON or YAML key. Without it the
+       # rule never matched `"api_key": "..."` at all -- the leading quote was
+       # allowed but the closing one was not, so the whole JSON case was dead.
+       r"[\"']?\s*[:=]\s*[\"']([^\"'\n]{8,})[\"']",
        "Read this from an environment variable instead of writing it into the file.",
        secret_group=2, confidence="medium", flags=re.IGNORECASE),
+
+    # The unquoted half, scoped to configuration formats rather than to code.
+    #
+    # The distinction that matters is not "env file" but "config file": in .env,
+    # YAML, INI and TOML an unquoted value is a literal, so `POSTGRES_PASSWORD:
+    # hunter2` really is a committed credential. In Python or JavaScript the same
+    # shape is one identifier assigned to another, which is the correct pattern,
+    # not the bug. Scoping this to .env alone lost the docker-compose case.
+    _p("config-assigned-secret", "Hardcoded credential in a config file", "WARNING",
+       r"^\s*(?:export\s+|-\s+)?"
+       r"([A-Za-z0-9_.\-]*(?:api[_\-]?key|apikey|secret|token|password|passwd|pwd)"
+       r"[A-Za-z0-9_.\-]*)"
+       r"\s*[:=]\s*[\"']?([^\"'\s#]{8,})[\"']?\s*$",
+       "Read this from the environment at runtime rather than committing the value.",
+       secret_group=2, confidence="medium", flags=re.IGNORECASE | re.MULTILINE,
+       filename_re=r"(^|[./])\.?env(\.|$)|\.env$"
+                   r"|\.(ya?ml|ini|cfg|conf|toml|properties)$"
+                   r"|^docker-?compose|^Dockerfile"),
 ]
 
 
@@ -203,6 +244,11 @@ PLACEHOLDER_MARKERS = (
     # for, and "postgresql://user:password@localhost/dbname" appears in roughly
     # every .env.example on earth. Remove these two if you want them reported.
     "localhost", "127.0.0.1",
+    # Documentation connection strings. Every one of these was a false positive
+    # in library docstrings when run over real third-party code -- polars,
+    # ultralytics and others all document their URI format this way.
+    "user:pass@", "username:password@", "user:password@", "://user:",
+    "://username:", "://root:", "://admin:", ":port/",
 )
 
 # A value that is just a reference to a real secret stored elsewhere. Very common
@@ -245,6 +291,23 @@ def _looks_like_placeholder(value, generic=False):
             return True
         # `api_key = settings.OPENAI_KEY` -- same reasoning.
         if _DOTTED_IDENT_RE.fullmatch(value):
+            return True
+
+        # The four shapes below were every remaining false positive when this
+        # engine was run over 12,775 files of real third-party code. None of
+        # them is a credential, and all four are common in correct code.
+        #
+        #   TOKEN_COMMENT_BEGIN: "begin of comment"     -- a human label
+        if any(ch.isspace() for ch in value):
+            return True
+        #   ENV_API_KEY = "ANTHROPIC_API_KEY"           -- a variable's *name*
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
+            return True
+        #   TOKEN_ENDPOINT = "/v1/oauth/token"          -- a route or URL
+        if value.startswith("/") or "://" in value:
+            return True
+        #   CHALLENGE_PASSWORD: "challengePassword"     -- an identifier as text
+        if re.fullmatch(r"[A-Za-z]+", value):
             return True
     return False
 
@@ -459,12 +522,16 @@ def scan(target, min_entropy=2.0, max_file_bytes=MAX_FILE_BYTES):
             continue
 
         exposure, downgrade, note = _exposure(path, tracked)
+        basename = os.path.basename(path)
 
         for lineno, line in enumerate(lines, start=1):
             if len(line) > _MAX_LINE_LEN:
                 continue
 
             for pattern in PATTERNS:
+                if (pattern.filename_re is not None
+                        and not pattern.filename_re.search(basename)):
+                    continue
                 for match in pattern.regex.finditer(line):
                     value = match.group(pattern.secret_group) or match.group(0)
 

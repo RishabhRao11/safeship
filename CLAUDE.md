@@ -64,7 +64,7 @@ what:
 | File | What it does | State |
 |---|---|---|
 | `scanner.py` | Runs Semgrep, returns parsed findings | Works |
-| `engines/secrets.py` | Credentials in **any** text file | Works, 15/15 on fixtures |
+| `engines/secrets.py` | Credentials in **any** text file | Works, 16/16 on fixtures |
 | `engines/dependencies.py` | OSV.dev CVE lookup, pip + npm | Works, 9/9 on fixtures |
 | `engines/config.py` | Insecure config, 22 rules + 2 absence checks | Works, 22/22 on fixtures |
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
@@ -98,6 +98,17 @@ engines already carry their answer:
 - *Config* — this one is the closest call, and is the obvious next improvement.
   Presence checks would benefit from judgment; **absence checks never should**,
   because there is no code at the location to reason about.
+
+**The generic credential rule requires a quoted value in code.** Run over 12,775
+files of real third-party libraries, the original rule produced 563 findings, 554
+of them false: in a code file `api_key=resolved_api_key` and
+`api_key_env_vars: Sequence[str]` are the *correct* pattern, not the bug. Quoted
+values are matched everywhere; the unquoted form is scoped to config formats
+(.env, YAML, INI, TOML, compose) where `NAME: value` really is a literal. Four
+further filters — no whitespace, no SCREAMING_SNAKE, no leading `/` or `://`, no
+all-letter words — removed the rest. Final: **17 findings on those 12,775 files**.
+The fixtures never caught any of this, because every fixture was written as
+`NAME = "literal"`. Fixtures test the shapes you thought of.
 
 **No generic high-entropy detection.** It's the largest false-positive source in
 every scanner that ships it — git SHAs, base64 images, minified bundles, integrity
@@ -180,7 +191,7 @@ they are how false-positive regressions get caught.
 | `test_targets/vulnerable.py` | 7 planted vulns, all 7 custom rules fire |
 | `test_targets/safe_but_flagged.py` | Semgrep over-fires; the LLM should dismiss |
 | `test_targets/mass_assignment.py` | Known false negative — no dangerous *function* to match |
-| `test_targets/secrets/` | 15 planted credentials; `.env.example` + `safe_config.py` must stay silent |
+| `test_targets/secrets/` | 16 planted credentials; `.env.example` + `safe_config.py` must stay silent |
 | `test_targets/deps/` | 9 vulnerable packages; unpinned + current ones ignored |
 | `test_targets/config/bad/` | 22 issues across Django/Flask/Express/Next.js/Docker |
 | `test_targets/config/good/` | **Zero findings.** Includes commented-out traps and a committed `.env.example` |
