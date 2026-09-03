@@ -192,9 +192,21 @@ push on pattern shape alone — allowlist the paths rather than weakening them.
 
 ---
 
+**One engine failing degrades the scan; it does not end it.** Found by running
+this on real projects, where Windows blocked Semgrep's native binary with an
+application-control policy and the whole run exited — throwing away three working
+engines. Every engine is now collected in `skipped` and named at the top of the
+report, and in the zero-findings path first of all: "no findings" plus a silently
+absent engine reads as a clean bill of health for checks nobody performed.
+
 ## Known gaps
 
 - **`explainer.py` has never run.** The only untested path in the pipeline.
+- **Semgrep is currently blocked on this machine** — `OSError: [WinError 4551]
+  An Application Control policy has blocked this file`, raised when semgrep
+  shells out to its native `osemgrep`. It worked earlier in the same session, so
+  a policy changed underneath it. Nothing in VibeSec can fix this; the scan now
+  degrades to the three pure-Python engines and says so.
 - **`CONTEXT_LINES = 5` in `analyze.py` clips context.** On
   `test_targets/mass_assignment.py` it cuts the function signature and the line
   reading the request body, so the model is asked "is this attacker-reachable?"

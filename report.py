@@ -136,6 +136,11 @@ section .note{color:var(--muted);font-size:.85rem;margin:0 0 .5rem}
 footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);
   color:var(--muted);font-size:.8rem}
 #nomatch{display:none;color:var(--muted);padding:1.5rem 0}
+.skipped{border:1px solid var(--high);border-left-width:4px;
+  border-radius:6px;padding:.85rem 1rem;margin:1.25rem 0 0;
+  background:var(--panel);font-size:.9rem}
+.skipped ul{margin:.4rem 0 0;padding-left:1.2rem}
+.skipped li{margin:.15rem 0}
 @media (max-width:46rem){
   .fhead{flex-wrap:wrap;gap:.4rem}
   .ftitle{flex:1 1 100%;order:2}
@@ -204,6 +209,25 @@ JS = """
   });
 })();
 """
+
+
+def _skipped_banner(skipped):
+    """Say plainly which engines did not run.
+
+    A report that omits a whole category without saying so reads as a clean bill
+    of health for findings nobody looked for. This is the one thing in the
+    document that must never be quiet.
+    """
+    if not skipped:
+        return ""
+    rows = "".join(
+        f"<li><b>{_esc(label)}</b> — {_prose(reason)}</li>" for label, reason in skipped
+    )
+    return (
+        '<div class="skipped"><b>Incomplete scan.</b> These engines did not run, '
+        "so findings of their kind cannot appear below. This is not a clean "
+        f"result.<ul>{rows}</ul></div>"
+    )
 
 
 def _tally(records):
@@ -312,7 +336,7 @@ def _section(title, note, records, group):
             f'<p class="note">{_esc(note)}</p>{body}</section>')
 
 
-def render(results, target, scan_count=None, deduped_count=None):
+def render(results, target, scan_count=None, deduped_count=None, skipped=()):
     """Return a complete HTML document for these findings."""
     real = [r for r in results
             if r["explanation"].get("is_real_vulnerability") and not r.get("error")]
@@ -352,6 +376,7 @@ def render(results, target, scan_count=None, deduped_count=None):
         f'<div class="sub"><code>{_esc(target)}</code> · {_esc(generated)}'
         f"{_esc(counted)}</div>"
         f'<div class="tallies">{_tally(real)}</div>'
+        f"{_skipped_banner(skipped)}"
         f"</header>"
         f"{_chips(results) if results else ''}"
         f'<div id="nomatch">No findings match the selected filters.</div>'
@@ -369,9 +394,10 @@ def render(results, target, scan_count=None, deduped_count=None):
     )
 
 
-def write(results, target, out_path, scan_count=None, deduped_count=None):
+def write(results, target, out_path, scan_count=None, deduped_count=None,
+          skipped=()):
     """Render and write the report. Returns the path written."""
-    document = render(results, target, scan_count, deduped_count)
+    document = render(results, target, scan_count, deduped_count, skipped)
     directory = os.path.dirname(os.path.abspath(out_path))
     if directory and not os.path.isdir(directory):
         os.makedirs(directory, exist_ok=True)

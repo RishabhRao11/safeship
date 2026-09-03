@@ -66,8 +66,12 @@ def _engine_record(payload):
 def main():
     records = ([_record(p) for p in PAYLOADS.values()]
                + [_engine_record(p) for p in PAYLOADS.values()])
+    # The skipped-engine banner renders text too, and its "reason" is a scanner
+    # error message -- which routinely quotes a path from the scanned repo, so it
+    # is as attacker-influenced as anything else in the document.
+    skipped = [(payload, payload) for payload in PAYLOADS.values()]
     # The target label is attacker-influenced too -- it reaches <title>.
-    document = report.render(records, PAYLOADS["script tag"], 12, 12)
+    document = report.render(records, PAYLOADS["script tag"], 12, 12, skipped=skipped)
 
     failures = []
 

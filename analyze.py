@@ -430,7 +430,7 @@ def _merge_adjacent(findings):
     return merged
 
 
-def print_report(results, target, scan_count, deduped_count):
+def print_report(results, target, scan_count, deduped_count, skipped=()):
     """Print the formatted report: summary block, then one entry per finding."""
     # Split real findings from ones the model judged safe. Both are worth showing --
     # the dismissals are how you calibrate whether to trust the tool.
@@ -454,6 +454,9 @@ def print_report(results, target, scan_count, deduped_count):
     judged = [r for r in results if r["engine"] == "semgrep"]
 
     print(f"  {scan_count} raw finding(s) across {deduped_count} location(s).")
+    for label, reason in skipped:
+        print(f"  NOT SCANNED -- {label}: {reason}")
+        print("  Findings of that kind cannot appear below. This is not a clean result.")
     if secret_hits:
         print(f"  Credentials: {len(secret_hits)} found by pattern match "
               "(never sent to the API).")
@@ -601,6 +604,7 @@ def main():
     # judgment call, secret findings never do.
     print(f"Scanning {args.target} ...", file=sys.stderr)
     all_findings = []
+    skipped = []  # (label, reason) for engines that could not run
 
     # Which engines run, resolved once. Previously each block tested its own
     # combination of flags inline, which is how --secrets-only ended up as the
@@ -613,47 +617,71 @@ def main():
     if not any((run_semgrep, run_secrets, run_config, run_deps)):
         raise SystemExit("Every engine is disabled; nothing to scan.")
 
+    # ONE ENGINE FAILING MUST NOT END THE SCAN
+    #   Found by running this on real projects: Windows blocked Semgrep's native
+    #   binary with an application-control policy, scanner.scan() raised, and the
+    #   whole run exited -- so a user with a perfectly working credential,
+    #   dependency and configuration scan got nothing at all.
+    #
+    #   Every engine now degrades instead. What did not run is collected in
+    #   `skipped` and printed at the top of the report, because silence about a
+    #   layer that never ran is how a security tool tells you that you are clean
+    #   when in fact nobody looked.
+    planned = []
     if run_semgrep:
         for config in configs:
-            try:
-                for finding in scanner.scan(args.target, config=config):
-                    finding["_engine"] = "semgrep"
-                    all_findings.append(finding)
-            except scanner.ScannerError as exc:
-                raise SystemExit(f"Scan failed: {exc}")
-
+            planned.append((
+                "semgrep", f"static analysis ({config})",
+                lambda c=config: scanner.scan(args.target, config=c),
+                scanner.ScannerError,
+            ))
     if run_secrets:
-        try:
-            for finding in secrets_engine.scan(args.target):
-                finding["_engine"] = "secrets"
-                all_findings.append(finding)
-        except secrets_engine.SecretScanError as exc:
-            raise SystemExit(f"Secret scan failed: {exc}")
-
+        planned.append((
+            "secrets", "credential scan",
+            lambda: secrets_engine.scan(args.target),
+            secrets_engine.SecretScanError,
+        ))
     if run_config:
-        try:
-            for finding in config_engine.scan(args.target):
-                finding["_engine"] = "config"
-                all_findings.append(finding)
-        except config_engine.ConfigScanError as exc:
-            raise SystemExit(f"Config scan failed: {exc}")
-
+        planned.append((
+            "config", "configuration scan",
+            lambda: config_engine.scan(args.target),
+            config_engine.ConfigScanError,
+        ))
     if run_deps:
+        planned.append((
+            "dependencies", "dependency scan",
+            lambda: dependencies_engine.scan(args.target),
+            dependencies_engine.DependencyScanError,
+        ))
+
+    for tag, label, produce, failure in planned:
         try:
-            for finding in dependencies_engine.scan(args.target):
-                finding["_engine"] = "dependencies"
+            for finding in produce():
+                finding["_engine"] = tag
                 all_findings.append(finding)
-        except dependencies_engine.DependencyScanError as exc:
-            # The only engine that needs the network, so it is the only one that
-            # can fail for reasons unrelated to the code being scanned. A dead
-            # connection must not throw away the findings the other two produced.
-            print(f"[dependency scan skipped] {exc}", file=sys.stderr)
+        except failure as exc:
+            reason = str(exc).strip().splitlines()[0]
+            skipped.append((label, reason))
+            print(f"[{label} skipped] {reason}", file=sys.stderr)
+
+    if skipped and len(skipped) == len(planned):
+        raise SystemExit(
+            "Every engine failed; nothing was scanned. Run `vibesec doctor` "
+            "or check the messages above."
+        )
 
     scan_count = len(all_findings)
     if scan_count == 0:
         print(f"\nNo findings in {args.target}.")
-        print("Worth remembering: that means these rules matched nothing, not that")
-        print("the file is secure. See test 3 in the red-team notes.")
+        # The most dangerous line in the program to get wrong. "No findings"
+        # plus a silently skipped engine reads as a clean bill of health for
+        # checks that never ran, so the skip is stated here first and loudest.
+        for label, reason in skipped:
+            print(f"\n  BUT: {label} did not run -- {reason}")
+            print("  Findings of that kind could not have been reported.")
+        print("\nWorth remembering: this means the rules that ran matched nothing,")
+        print("not that the project is secure. A scanner only finds what it knows")
+        print("to look for.")
         return
 
     findings = all_findings if args.no_dedupe else deduplicate(all_findings)
@@ -740,7 +768,8 @@ def main():
     # --- Step 4 & 5: report -------------------------------------------------
     if args.html:
         written = report.write(results, args.target, args.html,
-                               scan_count=scan_count, deduped_count=len(findings))
+                               scan_count=scan_count, deduped_count=len(findings),
+                               skipped=skipped)
         print(f"HTML report: {written}", file=sys.stderr)
 
     if args.json:
@@ -755,7 +784,7 @@ def main():
                   f"  {clean_rule_id(record['check_id'])}")
         return
 
-    print_report(results, args.target, scan_count, len(findings))
+    print_report(results, args.target, scan_count, len(findings), skipped)
 
 
 def anthropic_client():
