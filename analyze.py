@@ -845,6 +845,18 @@ def load_dotenv(path=ENV_FILE):
             os.environ[name] = value
 
 
+def _dotenv_value(name, path=ENV_FILE):
+    """Read one value straight from the .env file, ignoring os.environ."""
+    saved = os.environ.pop(name, None)
+    try:
+        load_dotenv(path)
+        return os.environ.get(name)
+    finally:
+        os.environ.pop(name, None)
+        if saved is not None:
+            os.environ[name] = saved
+
+
 def anthropic_client():
     """Build the API client, failing early with a useful message if the key is unset.
 
@@ -853,7 +865,27 @@ def anthropic_client():
     """
     import anthropic
 
+    # Captured before load_dotenv() so we can tell "the file supplied it" from
+    # "the environment already had one".
+    preset = os.environ.get("ANTHROPIC_API_KEY")
     load_dotenv()
+
+    # A shell variable outranks the file, which is correct and conventional -- and
+    # is also how a stale exported key silently beats the fresh one you just put
+    # in .env, producing an "API key rejected" that points nowhere. Say it out
+    # loud rather than letting the user debug a key they already fixed.
+    if preset:
+        file_key = _dotenv_value("ANTHROPIC_API_KEY")
+        if file_key and file_key != preset:
+            print(
+                "[warning] ANTHROPIC_API_KEY is set in your shell AND differs from "
+                f"the one in {ENV_FILE}.\n"
+                "          The shell value wins. If auth fails, that stale value is "
+                "why -- clear it with:\n"
+                '          [Environment]::SetEnvironmentVariable('
+                '"ANTHROPIC_API_KEY", $null, "User")',
+                file=sys.stderr,
+            )
 
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     # Catch a malformed key here rather than letting the server say "rejected"
