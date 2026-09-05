@@ -221,11 +221,12 @@ absent engine reads as a clean bill of health for checks nobody performed.
 ## Known gaps
 
 - **`explainer.py` has never run.** The only untested path in the pipeline.
-- **Semgrep is currently blocked on this machine** — `OSError: [WinError 4551]
-  An Application Control policy has blocked this file`, raised when semgrep
-  shells out to its native `osemgrep`. It worked earlier in the same session, so
-  a policy changed underneath it. Nothing in SafeShip can fix this; the scan now
-  degrades to the three pure-Python engines and says so.
+- **Semgrep intermittently dies under Windows Application Control.**
+  `OSError: [WinError 4551] An Application Control policy has blocked this file`,
+  raised when semgrep shells out to its native `osemgrep`. Seen mid-session on
+  2026-09-04, cleared by itself on 2026-09-05 — so treat it as flaky, not fixed.
+  Nothing in SafeShip can prevent it; the scan degrades to the three pure-Python
+  engines and says which engine did not run.
 - **`CONTEXT_LINES = 5` in `analyze.py` clips context.** On
   `test_targets/mass_assignment.py` it cuts the function signature and the line
   reading the request body, so the model is asked "is this attacker-reachable?"
