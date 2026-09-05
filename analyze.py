@@ -1,5 +1,5 @@
 """
-analyze.py -- VibeSec's command-line entry point.
+analyze.py -- SafeShip's command-line entry point.
 
 WHAT THIS DOES
     Runs every scanning engine over one target and prints a single report.
@@ -254,7 +254,7 @@ def clean_rule_id(check_id):
     Registry rules look like:
         python.lang.security.audit.eval-detected.eval-detected
     Custom rules loaded from an absolute path get the whole path baked in:
-        C.Users.rishi.OneDrive.Desktop.Rishabh.Projects.VibeSec.rules.vibe-eval-exec-on-variable
+        C.Users.rishi.OneDrive.Desktop.Rishabh.Projects.SafeShip.rules.vibe-eval-exec-on-variable
 
     That second form is Semgrep deriving a namespace from wherever the config file
     happened to live -- it says nothing about the rule and swamps the actual name.
@@ -442,7 +442,7 @@ def print_report(results, target, scan_count, deduped_count, skipped=()):
 
     print()
     print("=" * 78)
-    print(f"  VibeSec report: {target}")
+    print(f"  SafeShip report: {target}")
     print("=" * 78)
     print()
     # Broken out by engine: the two make claims of very different kinds, and one
@@ -666,7 +666,7 @@ def main():
 
     if skipped and len(skipped) == len(planned):
         raise SystemExit(
-            "Every engine failed; nothing was scanned. Run `vibesec doctor` "
+            "Every engine failed; nothing was scanned. Run `safeship doctor` "
             "or check the messages above."
         )
 
@@ -787,19 +787,65 @@ def main():
     print_report(results, args.target, scan_count, len(findings), skipped)
 
 
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def load_dotenv(path=ENV_FILE):
+    """Read KEY=value pairs from a .env file into os.environ.
+
+    WHY NOT python-dotenv
+        This is twenty lines of standard library, and SafeShip has exactly two
+        runtime dependencies. Adding a third to parse `KEY=value` is not a
+        trade worth making.
+
+    WHY ONLY SAFESHIP'S OWN .env, NEVER THE SCANNED PROJECT'S
+        `path` defaults to the file beside this script, not to one in the
+        current directory. The scanned project's .env belongs to the scanned
+        project: reading it would pull a stranger's credentials into our
+        process environment -- which every subprocess then inherits -- purely as
+        a side effect of pointing a security scanner at their code. The key
+        SafeShip uses is SafeShip's own.
+
+    A real environment variable always wins, so an exported key overrides the
+    file and CI needs no file at all.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return  # No .env is the normal case; the environment may still be set.
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        name, sep, value = line.partition("=")
+        if not sep:
+            continue
+        name = name.strip()
+        value = value.strip().strip('"').strip("'")
+        # Already-set variables win, and the placeholder is not a key.
+        if name and value and value != "()" and name not in os.environ:
+            os.environ[name] = value
+
+
 def anthropic_client():
     """Build the API client, failing early with a useful message if the key is unset.
 
     Checking here rather than on the first request means you find out before the scan
     results are thrown away, not after waiting through a scan.
     """
-    import os
-
     import anthropic
+
+    load_dotenv()
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit(
             "ANTHROPIC_API_KEY is not set.\n\n"
+            f"Easiest: put it in {ENV_FILE}\n"
+            "  ANTHROPIC_API_KEY=sk-ant-...\n\n"
             "PowerShell (this session only):\n"
             '  $env:ANTHROPIC_API_KEY = "sk-ant-..."\n\n'
             "PowerShell (persist for future sessions):\n"

@@ -14,7 +14,7 @@
 #       MISSED: CORS wildcard with credentials enabled
 #       MISSED: mass assignment / missing authorization in update_profile
 #
-#   That gap is the entire premise of VibeSec. Semgrep's default registry is tuned
+#   That gap is the entire premise of SafeShip. Semgrep's default registry is tuned
 #   for code written by humans who at least knew the rules existed. LLM-generated
 #   code fails differently: it is usually syntactically careful and contextually
 #   naive. These rules target that second failure mode.
@@ -30,7 +30,7 @@
 #
 # A NOTE ON SEVERITY
 #   Semgrep only has three levels: ERROR, WARNING, INFO. That's coarser than the
-#   critical/high/medium/low scale in VibeSec's report, and deliberately so -- the
+#   critical/high/medium/low scale in SafeShip's report, and deliberately so -- the
 #   finer grading is the explainer's job, because severity depends on whether the
 #   input is actually attacker-reachable, and that's a judgement call about the
 #   application, not a property of the syntax.

@@ -1,9 +1,9 @@
 {
-  "name": "vibesec",
+  "name": "safeship",
   "version": "0.1.0",
   "description": "Security scanner for vibe-coded projects. Finds leaked credentials, known-vulnerable dependencies, insecure configuration, and injection bugs in AI-generated Python and JavaScript.",
   "bin": {
-    "vibesec": "bin/vibesec.js"
+    "safeship": "bin/safeship.js"
   },
   "engines": {
     "node": ">=16"
@@ -34,6 +34,6 @@
     "!**/*.pyc"
   ],
   "scripts": {
-    "doctor": "node bin/vibesec.js doctor"
+    "doctor": "node bin/safeship.js doctor"
   }
 }

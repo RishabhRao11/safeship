@@ -35,7 +35,7 @@ PAYLOADS = {
 def _record(payload):
     """A finding with the payload in every attacker-reachable field."""
     return {
-        "check_id": f"vibesec.test.{payload}",
+        "check_id": f"safeship.test.{payload}",
         "path": f"src/{payload}/app.py",
         "line": 1,
         "engine": "semgrep",

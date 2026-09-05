@@ -1,4 +1,4 @@
-# VibeSec — security scanner for vibe-coded projects
+# SafeShip — security scanner for vibe-coded projects
 
 Scans a project with four independent engines and prints one report. Built for
 non-technical developers shipping AI-generated code, so the governing constraint
@@ -26,6 +26,14 @@ products, separate billing. The `sk-ant-` key is set at User scope and is valid;
 the balance is zero, so every request returns `400 credit balance is too low`.
 $5 is the minimum top-up. This blocks **only** `explainer.py` now — three of four
 engines need no API key at all.
+
+The key now lives in `.env` beside `analyze.py` (gitignored; `.env.example` is
+the committed template). `analyze.py` has a twenty-line stdlib `load_dotenv()` --
+no python-dotenv, the dependency count stays at two. It reads **only SafeShip's
+own .env**, never the scanned project's: pulling a stranger's credentials into
+our process environment, which every subprocess inherits, as a side effect of
+scanning their code is precisely what this tool exists to warn about. A real
+environment variable still wins over the file.
 
 To use the key in a command without exposing it:
 `$env:ANTHROPIC_API_KEY = [Environment]::GetEnvironmentVariable("ANTHROPIC_API_KEY","User")`
@@ -69,7 +77,7 @@ what:
 | `engines/config.py` | Insecure config, 22 rules + 2 absence checks | Works, 22/22 on fixtures |
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
 | `report.py` | Findings → one self-contained HTML file | Works |
-| `bin/vibesec.js` | npx CLI: preflight, then runs the scan locally | Works |
+| `bin/safeship.js` | npx CLI: preflight, then runs the scan locally | Works |
 | `rules/vibe_patterns.yaml` | 7 Python rules | Works, 7/7 |
 | `rules/vibe_patterns_js.yaml` | 7 JS/TS rules | Works, 11/11 |
 | `explainer.py` | Claude explains a Semgrep finding | **Never run — needs credits** |
@@ -149,11 +157,11 @@ specifically to prove we don't flag it.
 
 ```bash
 # As a user would, once published:
-npx vibesec scan            # scan .
-npx vibesec doctor          # check Python + Semgrep are present
+npx safeship scan            # scan .
+npx safeship doctor          # check Python + Semgrep are present
 
 # Locally, before publishing:
-node bin/vibesec.js scan ./someproject --no-explain
+node bin/safeship.js scan ./someproject --no-explain
 ```
 
 ```bash
@@ -216,7 +224,7 @@ absent engine reads as a clean bill of health for checks nobody performed.
 - **Semgrep is currently blocked on this machine** — `OSError: [WinError 4551]
   An Application Control policy has blocked this file`, raised when semgrep
   shells out to its native `osemgrep`. It worked earlier in the same session, so
-  a policy changed underneath it. Nothing in VibeSec can fix this; the scan now
+  a policy changed underneath it. Nothing in SafeShip can fix this; the scan now
   degrades to the three pure-Python engines and says so.
 - **`CONTEXT_LINES = 5` in `analyze.py` clips context.** On
   `test_targets/mass_assignment.py` it cuts the function signature and the line
@@ -244,14 +252,14 @@ absent engine reads as a clean bill of health for checks nobody performed.
 `npx` reaches the audience that ships AI-built products — Next.js and Express —
 and needs no install step. The core is Python because Semgrep is Python, and
 that combination has exactly one honest failure mode: npx promises zero-install
-and then hits a missing interpreter. So `bin/vibesec.js` checks Python (3.9+,
+and then hits a missing interpreter. So `bin/safeship.js` checks Python (3.9+,
 trying `py -3` first on Windows) and Semgrep before doing anything, and names
-what to install. `vibesec doctor` runs the same checks alone.
+what to install. `safeship doctor` runs the same checks alone.
 
 Two things that were wrong and are easy to reintroduce:
 
 - **Do not set `cwd` on the spawn.** An earlier version used `cwd: ROOT`, which
-  made `npx vibesec scan .` scan the installed package instead of the user's
+  made `npx safeship scan .` scan the installed package instead of the user's
   project. Python puts the script's own directory on `sys.path`, so imports
   resolve without it. The target is resolved to an absolute path for the same
   reason.
@@ -268,12 +276,12 @@ It deviates from the spec in one way worth remembering — "an AI-generated
 explanation for every issue" is not literally true, because three of four engines
 answer without the model.
 
-Item 5 (`npx vibesec scan`) is done, minus publishing. It runs the scan locally
+Item 5 (`npx safeship scan`) is done, minus publishing. It runs the scan locally
 rather than zipping and uploading, because there is no server by design — and for
 a tool that hunts credentials, not transmitting your source is a feature.
 
 Still open: nothing is published to npm, and there is no `pyproject.toml`, so
-`pip install vibesec` does not exist either. Publishing needs a license decision
+`pip install safeship` does not exist either. Publishing needs a license decision
 and a name check on the registry.
 
 Not a web app, not a hosted service, not scanning GitHub URLs. Local-only by

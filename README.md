@@ -1,10 +1,10 @@
-# VibeSec
+# SafeShip
 
 Security scanner for vibe-coded projects — the ones written mostly by an AI, shipped
 mostly on trust.
 
 ```bash
-npx vibesec scan
+npx safeship scan
 ```
 
 It reads your project, writes a single HTML report you can open or forward, and
@@ -23,7 +23,7 @@ Four engines run over the same target and land in one report.
 
 Those custom rules are the point. Against Semgrep's default registry alone:
 
-| Fixture | registry only | with VibeSec's rules |
+| Fixture | registry only | with SafeShip's rules |
 |---|---|---|
 | Python | 4/7 | **7/7** |
 | JavaScript | 2/11 | **11/11** |
@@ -50,16 +50,16 @@ alone on purpose.
 ## Usage
 
 ```bash
-npx vibesec scan                     # scan the current directory
-npx vibesec scan ./apps/web          # scan somewhere specific
-npx vibesec scan --secrets-only      # credentials only: no network, no API key
-npx vibesec scan --json > out.json   # machine-readable
-npx vibesec doctor                   # check the toolchain is installed
+npx safeship scan                     # scan the current directory
+npx safeship scan ./apps/web          # scan somewhere specific
+npx safeship scan --secrets-only      # credentials only: no network, no API key
+npx safeship scan --json > out.json   # machine-readable
+npx safeship doctor                   # check the toolchain is installed
 ```
 
 | Option | |
 |---|---|
-| `--html <path>` | where to write the report (default `vibesec-report.html`) |
+| `--html <path>` | where to write the report (default `safeship-report.html`) |
 | `--no-html` | skip the report |
 | `--json` | JSON on stdout |
 | `--secrets-only` | fastest path: offline, no API key |
@@ -69,7 +69,7 @@ npx vibesec doctor                   # check the toolchain is installed
 ## Requirements
 
 Node 16+, and **Python 3.9+** — the scanning core is Python because Semgrep is.
-`npx vibesec doctor` checks both and tells you exactly what to install. If Semgrep
+`npx safeship doctor` checks both and tells you exactly what to install. If Semgrep
 is missing:
 
 ```bash

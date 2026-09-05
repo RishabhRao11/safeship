@@ -1,5 +1,5 @@
 """
-scanner.py -- the static-analysis half of VibeSec.
+scanner.py -- the static-analysis half of SafeShip.
 
 WHAT THIS DOES
     Runs Semgrep against a target file (or directory) and hands back the findings

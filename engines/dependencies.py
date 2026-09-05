@@ -227,7 +227,7 @@ def _post(url, payload, timeout):
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url, data=body,
-        headers={"Content-Type": "application/json", "User-Agent": "vibesec"},
+        headers={"Content-Type": "application/json", "User-Agent": "safeship"},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -524,7 +524,7 @@ def scan(target, timeout=DEFAULT_TIMEOUT):
             )
 
         findings.append({
-            "check_id": f"vibesec.dependencies.{dep.ecosystem.lower()}-known-vulnerability",
+            "check_id": f"safeship.dependencies.{dep.ecosystem.lower()}-known-vulnerability",
             "path": os.path.abspath(dep.path),
             "start": {"line": dep.line, "col": 1},
             "end": {"line": dep.line, "col": 1},

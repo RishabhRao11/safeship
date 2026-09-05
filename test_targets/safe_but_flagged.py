@@ -7,7 +7,7 @@ cannot tell the difference wastes its user's time until they stop reading it.
 
 Semgrep flags this file. It is wrong to. Whether the LLM layer correctly says so is
 the clearest single demonstration of what the LLM adds over Semgrep alone -- if it
-just agrees with the scanner, the second half of VibeSec is decorative.
+just agrees with the scanner, the second half of SafeShip is decorative.
 """
 
 import sqlite3

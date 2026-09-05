@@ -373,7 +373,7 @@ def _absence_findings(facts):
 def _absence_finding(rule_id, name, path, line, message, remediation):
     """Absence findings are capped at WARNING -- we cannot see your proxy."""
     return {
-        "check_id": f"vibesec.config.{rule_id}",
+        "check_id": f"safeship.config.{rule_id}",
         "path": os.path.abspath(path),
         "start": {"line": line, "col": 1},
         "end": {"line": line, "col": 1},
@@ -507,7 +507,7 @@ def _committed_env_finding(path, tracked):
         "later commit does not help -- it stays readable in the history."
     )
     return {
-        "check_id": "vibesec.config.dotenv-committed",
+        "check_id": "safeship.config.dotenv-committed",
         "path": os.path.abspath(path),
         "start": {"line": 1, "col": 1},
         "end": {"line": 1, "col": 1},
@@ -591,7 +591,7 @@ def scan(target):
                 # if that file is what ships. Downgrading on tracking would also
                 # mute every finding in a project that has not run `git add` yet.
                 findings.append({
-                    "check_id": f"vibesec.config.{rule.id}",
+                    "check_id": f"safeship.config.{rule.id}",
                     "path": path,
                     "start": {"line": lineno, "col": match.start() + 1},
                     "end": {"line": lineno, "col": match.end() + 1},

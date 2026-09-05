@@ -1,5 +1,5 @@
 """
-explainer.py -- the LLM half of VibeSec.
+explainer.py -- the LLM half of SafeShip.
 
 WHAT THIS DOES
     Takes one Semgrep finding plus the surrounding code, sends it to Claude, and
@@ -9,7 +9,7 @@ WHAT THIS DOES
 WHY AN LLM AT ALL
     Semgrep tells you `python.lang.security.audit.formatted-sql-query.formatted-sql-query
     fired on line 97`. That is precise, correct, and useless to someone who doesn't
-    already know what SQL injection is. The gap VibeSec is trying to close isn't
+    already know what SQL injection is. The gap SafeShip is trying to close isn't
     detection -- it's the explanation. Semgrep finds the pattern; Claude explains why
     a stranger on the internet can use it to read your users table.
 
@@ -217,7 +217,7 @@ def build_user_prompt(finding, code_snippet):
     """Assemble the user-turn prompt for a single finding.
 
     THE PROMPT INJECTION PROBLEM -- the most important comment in this file
-        VibeSec reads attacker-influenced files and feeds them to an LLM. That is a
+        SafeShip reads attacker-influenced files and feeds them to an LLM. That is a
         textbook injection setup. Someone who wants their code to pass a scan just
         writes this in it:
 
@@ -243,7 +243,7 @@ def build_user_prompt(finding, code_snippet):
         problem, and you should assume a determined attacker can find phrasings that
         get through. This is the test to run first when you start attacking the tool:
         write the injection above into a file, scan it, and see what comes back. If
-        the report says "no vulnerabilities," you have found a real bug in VibeSec
+        the report says "no vulnerabilities," you have found a real bug in SafeShip
         and the tags plus instructions were not enough.
     """
     # Pull the fields Semgrep gives us, defensively -- a missing key should not

@@ -553,7 +553,7 @@ def scan(target, min_entropy=2.0, max_file_bytes=MAX_FILE_BYTES):
                     message += " " + pattern.remediation
 
                     findings.append({
-                        "check_id": f"vibesec.secrets.{pattern.id}",
+                        "check_id": f"safeship.secrets.{pattern.id}",
                         "path": path,
                         "start": {"line": lineno, "col": match.start() + 1},
                         "end": {"line": lineno, "col": match.end() + 1},

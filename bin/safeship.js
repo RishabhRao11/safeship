@@ -2,11 +2,11 @@
 'use strict';
 
 /*
- * vibesec -- npx entry point.
+ * safeship -- npx entry point.
  *
  * WHAT THIS IS NOT
  *   The original spec had this zip the codebase, upload it to an API, stream
- *   back status, and print a dashboard link. VibeSec is local-only by design, so
+ *   back status, and print a dashboard link. SafeShip is local-only by design, so
  *   there is no endpoint to upload to -- and for a tool whose whole job is
  *   finding your credentials, not transmitting your source anywhere is a feature
  *   rather than a limitation. This runs the scan on your machine and writes a
@@ -14,13 +14,13 @@
  *
  * WHY A NODE WRAPPER AROUND A PYTHON TOOL
  *   Most people shipping AI-generated products are shipping Next.js and Express,
- *   and `npx vibesec scan` needs no install step. The scanning core is Python
+ *   and `npx safeship scan` needs no install step. The scanning core is Python
  *   because Semgrep is Python.
  *
  *   That combination has one honest failure mode: npx promises zero-install and
  *   then hits a missing Python. So this checks the whole toolchain up front and
  *   says exactly what to install, rather than surfacing a stack trace from a
- *   subprocess three layers down. `vibesec doctor` runs those same checks on
+ *   subprocess three layers down. `safeship doctor` runs those same checks on
  *   their own.
  */
 
@@ -30,7 +30,7 @@ const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '..');
 const MIN_PYTHON = [3, 9];
-const DEFAULT_REPORT = 'vibesec-report.html';
+const DEFAULT_REPORT = 'safeship-report.html';
 
 // Candidate interpreters, best first. `py -3` is the Windows launcher, which is
 // present far more often than a `python3` on PATH.
@@ -91,11 +91,11 @@ function installHint(python) {
 function preflight({ quiet } = {}) {
   const python = findPython();
   if (!python) {
-    console.error(red('vibesec needs Python 3.9 or newer, and could not find it.'));
+    console.error(red('safeship needs Python 3.9 or newer, and could not find it.'));
     if (findPython.tooOld) {
       console.error(`Found ${findPython.tooOld}, which is too old.`);
     }
-    console.error('\nVibeSec scans with Semgrep, which is a Python tool. Install');
+    console.error('\nSafeShip scans with Semgrep, which is a Python tool. Install');
     console.error('Python from https://python.org/downloads (tick "Add to PATH"');
     console.error('on Windows), then run this command again.');
     return null;
@@ -104,11 +104,11 @@ function preflight({ quiet } = {}) {
 
   const semgrep = checkSemgrep(python);
   if (!semgrep) {
-    console.error(red('vibesec found Python but not Semgrep.'));
+    console.error(red('safeship found Python but not Semgrep.'));
     console.error('\nInstall the dependencies with:\n');
     console.error(installHint(python));
     console.error('\nNote: `python -m semgrep` does not work on semgrep 1.38 or');
-    console.error('newer -- it prints a deprecation notice and exits. VibeSec');
+    console.error('newer -- it prints a deprecation notice and exits. SafeShip');
     console.error('locates the executable itself, so you only need the install.');
     return null;
   }
@@ -122,7 +122,7 @@ function preflight({ quiet } = {}) {
 /* ---------------------------------------------------------------------- */
 
 function doctor() {
-  console.log(bold('vibesec doctor\n'));
+  console.log(bold('safeship doctor\n'));
   const python = preflight({});
   if (!python) {
     process.exit(1);
@@ -131,10 +131,10 @@ function doctor() {
   const ok = fs.existsSync(analyze);
   console.log(dim(`analyze.py ${ok ? 'found' : 'MISSING'} at ${analyze}`));
   if (!ok) {
-    console.error(red('\nThe Python half of vibesec is missing from this package.'));
+    console.error(red('\nThe Python half of safeship is missing from this package.'));
     process.exit(1);
   }
-  console.log(green('\nEverything vibesec needs is present.'));
+  console.log(green('\nEverything safeship needs is present.'));
 }
 
 function scan(argv) {
@@ -168,7 +168,7 @@ function scan(argv) {
 
   // Absolute, because the child does NOT run in this directory and a bare "."
   // would otherwise resolve against the installed package rather than the
-  // user's project -- scanning vibesec itself and reporting it as their code.
+  // user's project -- scanning safeship itself and reporting it as their code.
   const absTarget = path.resolve(target);
 
   const args = [
@@ -188,7 +188,7 @@ function scan(argv) {
   // said the same thing twice.
 
   // stdio inherited so progress on stderr streams live and the report on stdout
-  // stays pipeable: `npx vibesec scan --json > findings.json` works unchanged.
+  // stays pipeable: `npx safeship scan --json > findings.json` works unchanged.
   //
   // cwd is deliberately left as the user's directory rather than the package's.
   // Python puts the script's own directory on sys.path, so `from engines import
@@ -216,10 +216,10 @@ function scan(argv) {
 
 function usage() {
   console.log(`
-${bold('vibesec')} — security scanner for vibe-coded projects
+${bold('safeship')} — security scanner for vibe-coded projects
 
-  ${bold('npx vibesec scan')} [path]        scan a directory (default: .)
-  ${bold('npx vibesec doctor')}             check that the toolchain is installed
+  ${bold('npx safeship scan')} [path]        scan a directory (default: .)
+  ${bold('npx safeship doctor')}             check that the toolchain is installed
 
 Options for ${bold('scan')}:
   --html <path>     where to write the report (default: ${DEFAULT_REPORT})
@@ -251,7 +251,7 @@ function main() {
   if (command === 'doctor') return doctor();
   if (command === 'scan') return scan(argv.slice(1));
 
-  // `npx vibesec ./myproject` with no subcommand is what people will type.
+  // `npx safeship ./myproject` with no subcommand is what people will type.
   if (!command.startsWith('-')) return scan(argv);
 
   console.error(red(`Unknown command: ${command}`));

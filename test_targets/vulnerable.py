@@ -1,9 +1,9 @@
 """
-vulnerable.py -- a deliberately broken web app, used as VibeSec's test fixture.
+vulnerable.py -- a deliberately broken web app, used as SafeShip's test fixture.
 
 READ THIS FIRST
     Every function below is wrong on purpose. Do not copy any of it into real code.
-    It exists so that VibeSec has something with known-bad patterns to scan, which is
+    It exists so that SafeShip has something with known-bad patterns to scan, which is
     the only way to answer the question "is my scanner actually working, or is it just
     finding nothing?" A scanner that reports zero findings on a clean file and zero
     findings on a broken file is indistinguishable from a scanner that is broken.
@@ -244,7 +244,7 @@ def debug_info():
 #   understanding why: there's no dangerous *function* being called here. eval() and
 #   shell=True are recognisable shapes a scanner can pattern-match. "This field should
 #   not have been writable by the client" requires knowing what the application means,
-#   which is exactly the gap the LLM half of VibeSec is supposed to cover. Watch
+#   which is exactly the gap the LLM half of SafeShip is supposed to cover. Watch
 #   whether it does -- if the scan misses this one, that's Step 6's false-negative
 #   finding sitting right here in the fixture.
 #
