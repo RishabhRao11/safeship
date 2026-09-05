@@ -434,8 +434,16 @@ def print_report(results, target, scan_count, deduped_count, skipped=()):
     """Print the formatted report: summary block, then one entry per finding."""
     # Split real findings from ones the model judged safe. Both are worth showing --
     # the dismissals are how you calibrate whether to trust the tool.
-    real = [r for r in results if r["explanation"].get("is_real_vulnerability")]
-    dismissed = [r for r in results if not r["explanation"].get("is_real_vulnerability")]
+    # A finding whose explanation FAILED also has is_real_vulnerability False, so
+    # without the error guard it lands in both lists: counted twice in the summary,
+    # then crashing here on the attacker_scenario key it never got. "Dismissed"
+    # means Claude looked and found no attack; "failed" means nobody looked. Saying
+    # the second is the first is the worst possible confusion for a security tool.
+    real = [r for r in results
+            if r["explanation"].get("is_real_vulnerability") and not r.get("error")]
+    dismissed = [r for r in results
+                 if not r["explanation"].get("is_real_vulnerability")
+                 and not r.get("error")]
     failed = [r for r in results if r.get("error")]
 
     real.sort(key=lambda r: SEVERITY_ORDER.get(r["explanation"].get("severity"), 9))
@@ -514,7 +522,7 @@ def print_report(results, target, scan_count, deduped_count, skipped=()):
         for result in dismissed:
             exp = result["explanation"]
             print(f"  {result['path']}:{result['line']}  {clean_rule_id(result['check_id'])}")
-            print(f"    {exp['attacker_scenario']}")
+            print(f"    {exp.get('attacker_scenario', '(no explanation recorded)')}")
             print()
 
     if failed:
@@ -826,7 +834,13 @@ def load_dotenv(path=ENV_FILE):
             continue
         name = name.strip()
         value = value.strip().strip('"').strip("'")
-        # Already-set variables win, and the placeholder is not a key.
+        # `KEY=(sk-ant-...)` -- pasting *into* the () placeholder instead of over
+        # it is the obvious reading of it, and the resulting failure is a useless
+        # "API key rejected" from the server. No credential contains parentheses,
+        # so unwrapping them is free and saves a baffling round trip.
+        if len(value) > 2 and value.startswith("(") and value.endswith(")"):
+            value = value[1:-1].strip()
+        # Already-set variables win, and the bare placeholder is not a key.
         if name and value and value != "()" and name not in os.environ:
             os.environ[name] = value
 
@@ -841,7 +855,22 @@ def anthropic_client():
 
     load_dotenv()
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    # Catch a malformed key here rather than letting the server say "rejected"
+    # after a scan has already run. Anthropic keys start with a known prefix, so
+    # anything else is a paste error, not an auth failure worth debugging.
+    if key and not key.startswith("sk-ant-"):
+        raise SystemExit(
+            f"ANTHROPIC_API_KEY does not look like an Anthropic key "
+            f"(starts with {key[:6]!r}, expected 'sk-ant-').\n\n"
+            f"Check {ENV_FILE} -- the value should be the bare key with no "
+            "quotes, brackets, or trailing spaces:\n"
+            "  ANTHROPIC_API_KEY=sk-ant-api03-...\n\n"
+            "Note a shell variable overrides the file, so if one is exported "
+            "with an old value, that is what gets used."
+        )
+
+    if not key:
         raise SystemExit(
             "ANTHROPIC_API_KEY is not set.\n\n"
             f"Easiest: put it in {ENV_FILE}\n"

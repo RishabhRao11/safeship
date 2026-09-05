@@ -80,7 +80,7 @@ what:
 | `bin/safeship.js` | npx CLI: preflight, then runs the scan locally | Works |
 | `rules/vibe_patterns.yaml` | 7 Python rules | Works, 7/7 |
 | `rules/vibe_patterns_js.yaml` | 7 JS/TS rules | Works, 11/11 |
-| `explainer.py` | Claude explains a Semgrep finding | **Never run — needs credits** |
+| `explainer.py` | Claude explains a Semgrep finding | **Works** — first real run 2026-09-05 |
 
 Measured on `test_targets/`: 87 raw findings → 72 locations.
 
@@ -220,7 +220,12 @@ absent engine reads as a clean bill of health for checks nobody performed.
 
 ## Known gaps
 
-- **`explainer.py` has never run.** The only untested path in the pipeline.
+- **`CONTEXT_LINES` is the wrong shape, not just the wrong number.** Measured on
+  `test_targets/mass_assignment.py` (finding on line 38): 5 and 10 both miss
+  `data = request.get_json()` on line 24, so Claude hedges — "*if* `data` comes
+  from a request body". 14 reaches the input source, 20 reaches the `def`. The
+  right value depends on where in the function the bug sits, which is the
+  argument for walking up to the enclosing function instead of counting lines.
 - **Semgrep intermittently dies under Windows Application Control.**
   `OSError: [WinError 4551] An Application Control policy has blocked this file`,
   raised when semgrep shells out to its native `osemgrep`. Seen mid-session on
