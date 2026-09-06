@@ -118,13 +118,35 @@ all-letter words — removed the rest. Final: **17 findings on those 12,775 file
 The fixtures never caught any of this, because every fixture was written as
 `NAME = "literal"`. Fixtures test the shapes you thought of.
 
+**Snippets extend to the enclosing function, not a fixed line count.**
+`find_enclosing_start()` walks up from the finding to the first line that both
+starts a scope and is indented less than the finding — true in Python, true in
+practice for formatted JS — then absorbs any decorators above it, because
+`@app.route(...)` is often the strongest clue that a handler is reachable at all.
+Capped at `MAX_LOOKBACK = 40` so a long handler does not put 300 lines in every
+prompt, and the window can only ever widen: `min(enclosing, fixed_window)` means
+a finding on a function's first line still gets the old context.
+
+Measured before and after on the same two fixtures:
+
+| | before | after |
+|---|---|---|
+| `safe_but_flagged.py` (safe code) | 4/5 dismissed, **1 false positive** | **5/5 dismissed** |
+| `mass_assignment.py` (real bug) | confirmed, but hedged — "*if* `data` comes from a request body" | confirmed, names the route: "an attacker POSTs to `/api/profile`" |
+
+*Known limit:* it finds the enclosing **function**, so a module-level constant
+the function references stays outside the window — `ALLOWED_SORT_COLUMNS` on line
+47 of `safe_but_flagged.py` is still not included. It turned out not to matter:
+the `if sort_column not in ALLOWED_SORT_COLUMNS` guard *inside* the function is
+enough for the model to reason correctly. Resolving referenced names to their
+definitions would be the next step, and is not obviously worth it.
+
 **The LLM layer earns its place — measured, not assumed.** First real runs,
 2026-09-05. On `safe_but_flagged.py` Semgrep raised 11 findings across 5
-locations on genuinely safe code; Claude dismissed 4 of 5 with correct
-reasoning (`int()` casts mean no payload survives to the query). On
-`mass_assignment.py` it confirmed the real bug with concrete payloads and an
-allowlist fix. The one wrong answer was a context bug, not a model failure — see
-Known gaps. Roughly two cents per run at Sonnet 5.
+locations on genuinely safe code; Claude dismissed all 5 with correct
+reasoning (`int()` casts mean no payload survives to the query; the allowlist
+guard blocks the rest). On `mass_assignment.py` it confirmed the real bug with
+concrete payloads and an allowlist fix. Roughly two cents per run at Sonnet 5.
 
 **No generic high-entropy detection.** It's the largest false-positive source in
 every scanner that ships it — git SHAs, base64 images, minified bundles, integrity
@@ -228,33 +250,6 @@ absent engine reads as a clean bill of health for checks nobody performed.
 
 ## Known gaps
 
-- **`CONTEXT_LINES` is the wrong shape, not just the wrong number — and it
-  causes false positives, not just vague ones.** Two measurements, 2026-09-05,
-  both with the default of 5.
-
-  *`safe_but_flagged.py` — the important one.* One function, one allowlist,
-  three findings, and the window is the only thing that differs:
-
-  | Finding | Window | Sees the allowlist? | Verdict |
-  |---|---|---|---|
-  | line 52 | 47-57 | yes, the definition on 47 | dismissed, correct |
-  | line 58 | 53-63 | sees the guard on 53 | dismissed, correct |
-  | line 59 | 54-64 | misses 47 **and** 53 | **false positive** |
-
-  Claude said so itself in the bad answer: *"the only protection shown is an
-  earlier check ... but we don't see that check actually restrict the input"*. It
-  reasoned correctly about an incomplete picture and then invented a blind-SQLi
-  payload to fill the gap. This is the failure mode the whole project is built to
-  avoid — see the opening line of this file.
-
-  *`mass_assignment.py`.* Finding on line 38; 5 and 10 both miss
-  `data = request.get_json()` on line 24, so the answer hedges — *"if `data`
-  comes from a request body"*. 14 reaches the input source, 20 reaches the `def`.
-
-  The two files want 12 and 20. Any constant is wrong somewhere, which is the
-  argument for walking up to the enclosing function rather than counting lines.
-  **Pass condition for a fix:** line 59 of `safe_but_flagged.py` gets dismissed
-  too, with `mass_assignment.py:38` still confirmed.
 - **Semgrep intermittently dies under Windows Application Control.**
   `OSError: [WinError 4551] An Application Control policy has blocked this file`,
   raised when semgrep shells out to its native `osemgrep`. Seen mid-session on

@@ -35,6 +35,7 @@ ADDING AN ENGINE
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter
 
@@ -47,14 +48,81 @@ from engines import config as config_engine
 from engines import dependencies as dependencies_engine
 from engines import secrets as secrets_engine
 
-# How many lines of context to include on either side of a flagged line.
+# Lines of context below the flagged line, and the floor for context above it.
 #
-# This number matters more than it looks. Too few and the model can't tell whether
-# the flagged code is reachable with attacker input -- it sees `cursor.execute(query)`
-# with no idea where `query` came from. Too many and you pay for tokens that don't
-# help, and the model has more places to get distracted. Five each way is a starting
-# point; if you find explanations are missing obvious context, raise it and compare.
+# Above the finding, extract_snippet() prefers the start of the enclosing function
+# (see find_enclosing_start) and only falls back to this count when it cannot find
+# one. It is a floor, never a ceiling: the window never shrinks below what this
+# number alone would have given.
 CONTEXT_LINES = 5
+
+# Ceiling on the upward walk. A 300-line handler would otherwise put 300 lines in
+# every prompt for one finding -- paying for tokens that mostly distract, on a
+# per-finding basis across a whole scan.
+MAX_LOOKBACK = 40
+
+# What counts as the start of an enclosing scope. Deliberately covers Python and
+# JavaScript/TypeScript in one pattern: findings arrive from Semgrep in either
+# language, and the caller does not know which file it is looking at.
+_SCOPE_START_RE = re.compile(
+    r"""^\s*(?:
+        (?:async\s+)?def\s+\w+                          # Python def / async def
+      | class\s+\w+                                     # Python class
+      | (?:export\s+)?(?:default\s+)?(?:async\s+)?function\b   # JS function decl
+      | (?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*     # JS assigned function:
+        (?:async\s*)?(?:function\b|\(|\w+\s*=>)          #   = function / = ( / = x =>
+      | (?:app|router|api|server)\s*\.\s*\w+\s*\(        # Express route handler
+    )""",
+    re.VERBOSE,
+)
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip())
+
+
+def find_enclosing_start(lines, start_line, max_lookback=MAX_LOOKBACK):
+    """1-indexed line where the flagged line's enclosing scope begins, or None.
+
+    WHY THIS EXISTS -- MEASURED, NOT GUESSED
+        A fixed window is the wrong shape. `test_targets/safe_but_flagged.py` has
+        one function, one allowlist, and three findings; the only difference
+        between them is what the window happened to include. Line 52 saw the
+        allowlist and was dismissed. Line 59 saw neither the definition nor the
+        guard, and Claude invented a blind-SQLi payload to explain the gap --
+        saying so in its own answer: "we don't see that check". A false positive
+        on safe code is the one error this tool is built to avoid.
+
+        No constant fixes it: that file wants 12 lines of lookback and
+        `mass_assignment.py` wants 20. What both actually want is the function.
+
+    Scope is decided by indentation, not by brace or block parsing: a line that
+    both starts a scope AND is indented less than the finding encloses it. That
+    is exactly true in Python and true in practice for formatted JavaScript,
+    without this module having to know which language it is reading.
+
+    Decorators directly above the definition are included -- `@app.route(...)` is
+    frequently the single strongest clue that a handler is reachable by a request
+    at all, which is the question the explainer is being asked.
+    """
+    index = start_line - 1
+    if index < 0 or index >= len(lines):
+        return None
+
+    target_indent = _indent(lines[index])
+    stop = max(-1, index - 1 - max_lookback)
+
+    for i in range(index - 1, stop, -1):
+        line = lines[i]
+        if not line.strip():
+            continue
+        if _indent(line) < target_indent and _SCOPE_START_RE.match(line):
+            # Absorb decorator lines sitting directly above the definition.
+            first = i
+            while first - 1 >= 0 and lines[first - 1].lstrip().startswith("@"):
+                first -= 1
+            return first + 1
+    return None
 
 # Sort order for the report. Worst first -- someone skimming a report reads the top.
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "none": 4}
@@ -87,7 +155,15 @@ def extract_snippet(lines, start_line, end_line, context=CONTEXT_LINES):
     """
     # max(0, ...) stops a finding on line 2 from producing a negative index, which
     # would silently wrap around and slice from the END of the file.
-    first = max(0, start_line - 1 - context)
+    fallback = max(0, start_line - 1 - context)
+
+    # Prefer the enclosing function, but only ever to widen the window. min()
+    # rather than a plain assignment: when a finding sits on the first line of a
+    # function, the definition alone would give less surrounding code than the
+    # fixed count did, and this change must not make any case worse.
+    enclosing = find_enclosing_start(lines, start_line)
+    first = min(enclosing - 1, fallback) if enclosing is not None else fallback
+
     # Slicing past the end of a list is safe in Python, so no min() needed here.
     last = end_line + context
 
