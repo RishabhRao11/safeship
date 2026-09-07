@@ -330,7 +330,7 @@ def clean_rule_id(check_id):
     Registry rules look like:
         python.lang.security.audit.eval-detected.eval-detected
     Custom rules loaded from an absolute path get the whole path baked in:
-        C.Users.rishi.OneDrive.Desktop.Rishabh.Projects.SafeShip.rules.vibe-eval-exec-on-variable
+        C.Users.you.projects.safeship.rules.vibe-eval-exec-on-variable
 
     That second form is Semgrep deriving a namespace from wherever the config file
     happened to live -- it says nothing about the rule and swamps the actual name.
