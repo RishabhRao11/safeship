@@ -21,6 +21,7 @@
     "vibecoding"
   ],
   "files": [
+    "LICENSE",
     "bin/",
     "engines/",
     "rules/",
