@@ -10,6 +10,12 @@ npx safeship scan
 It reads your project, writes a single HTML report you can open or forward, and
 uploads nothing. Everything runs on your machine.
 
+![A SafeShip report: severity tallies, filters by severity and engine, and a SQL
+injection finding expanded to show the attack and the fix](docs/report.png)
+
+*An actual report from a small Express app — 33 findings across 21 locations. Each
+finding expands to show why it matters and the code that fixes it.*
+
 ## What it looks for
 
 Four engines run over the same target and land in one report.

@@ -5,7 +5,7 @@ non-technical developers shipping AI-generated code, so the governing constraint
 is **a false positive costs more than a missed finding**: a user who gets twenty
 fake criticals stops running the tool at all.
 
-Target audience is the vibecoder. Rishabh runs it, judges the output, and attacks
+Target audience is the vibecoder. Whoever runs it judges the output and attacks
 it. Code is production-shaped — clean modules, real error handling for other
 people's messy repos — not a tutorial.
 
@@ -18,14 +18,14 @@ Three facts that cost real time. Don't rediscover them.
 **1. `python -m semgrep` does not work.** Deprecated in 1.38.0; this machine has
 1.173.0, where it prints a warning and exits 2 without scanning. Use the `semgrep`
 executable. On Windows it shells out to a separate `pysemgrep`; both live in
-`C:\Users\rishi\AppData\Roaming\Python\Python314\Scripts`. `scanner.py` already
+the Python user-scheme `Scripts` directory. `scanner.py` already
 finds them via `sysconfig` — you don't need to touch PATH.
 
 **2. A Claude Pro subscription does NOT include Anthropic API credits.** Separate
-products, separate billing. The `sk-ant-` key is set at User scope and is valid;
-the balance is zero, so every request returns `400 credit balance is too low`.
-$5 is the minimum top-up. This blocks **only** `explainer.py` now — three of four
-engines need no API key at all.
+products, separate billing: a valid `sk-ant-` key with no balance returns
+`400 credit balance is too low` on every request, which reads like a broken key
+and is not one. $5 is the minimum top-up. This affects **only** `explainer.py` —
+three of four engines need no API key at all.
 
 The key now lives in `.env` beside `analyze.py` (gitignored; `.env.example` is
 the committed template). `analyze.py` has a twenty-line stdlib `load_dotenv()` --
@@ -267,8 +267,8 @@ absent engine reads as a clean bill of health for checks nobody performed.
 
 - **One step at a time.** Do not write the next file until the last one has run.
   Untested code is not progress.
-- **Rishabh runs it and judges the output.** If Claude both writes the tool and
-  grades its answers, he learns nothing. The judgment is the point.
+- **Whoever runs it judges the output.** If the model both writes the tool and
+  grades its own answers, nobody learns anything. The judgment is the point.
 - **Every new rule needs a good fixture too**, not just a bad one. A rule with no
   negative test is a false positive waiting to ship.
 - **Ask before adding files.** This repo accumulated scaffolding fast once before.
