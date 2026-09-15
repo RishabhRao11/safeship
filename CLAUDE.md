@@ -80,6 +80,7 @@ what:
 | `bin/safeship.js` | npx CLI: preflight, then runs the scan locally | Works |
 | `rules/vibe_patterns.yaml` | 7 Python rules | Works, 7/7 |
 | `rules/vibe_patterns_js.yaml` | 7 JS/TS rules | Works, 11/11 |
+| `rules/taint_flows.yaml` | 6 dataflow rules, Python + JS/TS | Works, 0 FPs on both safe fixtures |
 | `explainer.py` | Claude explains a Semgrep finding | **Works** — first real run 2026-09-05 |
 
 Measured on `test_targets/`: 87 raw findings → 72 locations.
@@ -147,6 +148,49 @@ locations on genuinely safe code; Claude dismissed all 5 with correct
 reasoning (`int()` casts mean no payload survives to the query; the allowlist
 guard blocks the rest). On `mass_assignment.py` it confirmed the real bug with
 concrete payloads and an allowlist fix. Roughly two cents per run at Sonnet 5.
+
+**Three confidence tiers, not one.** Findings differ in how much is *known*
+about them, and the pipeline routes them accordingly:
+
+| Tier | What it means | Goes to the model? |
+|---|---|---|
+| Engine-answered | A credential, a CVE, a config line — the answer is a fact | No |
+| **Dataflow (taint)** | Input provably reaches a sink, no sanitizer between | **No** |
+| Pattern match | This shape is suspicious; reachability unknown | Yes |
+
+`rules/taint_flows.yaml` asks a different question from `vibe_patterns.yaml`:
+not "does this line look dangerous" but "can attacker input actually arrive
+here, and was it neutralised on the way". Declaring `int()`, `float()`,
+`.isdigit()` and allowlist-membership as **sanitizers** encodes in the rule what
+the model previously had to re-derive on every run.
+
+Measured on `test_targets/safe_but_flagged.py`, genuinely safe code:
+
+| | findings | cost to clear |
+|---|---|---|
+| Semgrep registry (`auto`) | 9 | 9 API calls |
+| `vibe_patterns.yaml` | 2 | 2 API calls |
+| `taint_flows.yaml` | **0** | **nothing — the rule knows** |
+
+**Taint does NOT replace the pattern rules, and running only taint is a
+downgrade.** The two fail in opposite directions. On `vulnerable.py` the pattern
+rules catch 3 of 3 SQL injections; taint catches 1, because the other two sit in
+plain helpers (`def get_user(user_id):`) with no decorator and no request call —
+nothing in the file says that parameter is attacker-controlled, so there is no
+source to start from. Over-firing annoys people; silently missing is worse and
+feels better. Keep both.
+
+Three bugs found writing these, all worth not repeating:
+
+- **A bare `$REQ.query` matches any object's `.query`** — including `db.query`,
+  which made the sink its own source and flagged every constant query. Constrain
+  the metavariable with `metavariable-regex`.
+- **`subprocess.run(...)` as a sink flags the fix.** `subprocess.run(["ping",
+  host])` has no shell to inject into; only `shell=True` is the sink.
+- **`focus-metavariable` is what separates a parameterised query from an
+  injection.** Without it, `db.query('... WHERE id = ?', [req.query.id])` — the
+  recommended form — is flagged, because the value does reach the call. It
+  reaches the *parameter array*, not the statement.
 
 **No generic high-entropy detection.** It's the largest false-positive source in
 every scanner that ships it — git SHAs, base64 images, minified bundles, integrity

