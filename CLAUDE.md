@@ -347,9 +347,25 @@ engines kept working, and the path only runs when one stops.
 - **Semgrep intermittently dies under Windows Application Control.**
   `OSError: [WinError 4551] An Application Control policy has blocked this file`,
   raised when semgrep shells out to its native `osemgrep`. Seen mid-session on
-  2026-09-04, cleared by itself on 2026-09-05 — so treat it as flaky, not fixed.
-  Nothing in SafeShip can prevent it; the scan degrades to the three pure-Python
-  engines and says which engine did not run.
+  2026-09-04, cleared by itself on 2026-09-05, back on 2026-09-20 — so treat it
+  as flaky, not fixed. Nothing in SafeShip can prevent it; the scan degrades to
+  the three pure-Python engines and says which engine did not run.
+
+  **It has a second face, and it looks like a packaging bug.** On 2026-09-21 the
+  same policy blocked `pysemgrep.exe` instead of `osemgrep`. `semgrep.exe` then
+  starts fine, fails to spawn its child, and reports
+
+      exit code 127 -- executing pysemgrep failed: No such file or directory
+
+  which reads as a missing file or a broken PATH. It is neither. `scanner.py`
+  locates both shims and hands subprocess a PATH containing them; verify with
+
+      python -c "import scanner,shutil; e,v=scanner.find_semgrep(); print(shutil.which('pysemgrep',path=v['PATH']))"
+
+  If that prints a path, SafeShip has done its job and the policy is the cause.
+  Running the shim directly confirms it — `pysemgrep.exe --version` returns
+  "Permission denied". Diagnosed once while checking a release; do not go
+  rewriting PATH handling over it.
 - **`metavariable-regex` matches in FULL, it does not search.** A bare
   `(select|insert)` silently matches nothing; it needs wrapping `.*`. This
   cost real time — the rule loaded, ran, and quietly found less than it should.
@@ -450,9 +466,18 @@ Item 5 (`npx safeship scan`) is done, minus publishing. It runs the scan locally
 rather than zipping and uploading, because there is no server by design — and for
 a tool that hunts credentials, not transmitting your source is a feature.
 
-Still open: nothing is published to npm, and there is no `pyproject.toml`, so
-`pip install safeship` does not exist either. Publishing needs a license decision
-and a name check on the registry.
+Published to npm: `safeship@0.1.0` on 2026-09-08, `0.2.0` on 2026-09-21. The
+version bump is a **minor**, not a patch, because `rules/taint_flows.yaml` is new
+detection capability rather than a fix. `CHANGELOG.md` is the record and ships
+with the package.
+
+Verify a release the way the last one was verified: `npm pack`, install the
+tarball into a scratch directory, and run the CLI from there against a project
+somewhere else entirely. That is what proves the `cwd` bug has not come back —
+running it from inside the repo cannot, because both paths happen to work.
+
+Still open: there is no `pyproject.toml`, so `pip install safeship` does not
+exist. Nothing else blocks it.
 
 Not a web app, not a hosted service, not scanning GitHub URLs. Local-only by
 design.

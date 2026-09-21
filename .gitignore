@@ -10,3 +10,6 @@ ma_prompt.md
 # Generated scan reports.
 report.html
 *.report.html
+
+# npm pack output
+*.tgz

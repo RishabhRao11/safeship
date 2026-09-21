@@ -1,6 +1,6 @@
 {
   "name": "safeship",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Security scanner for vibe-coded projects. Finds leaked credentials, known-vulnerable dependencies, insecure configuration, and injection bugs in AI-generated Python and JavaScript.",
   "author": "Rishabh (@RishabhRao11)",
   "license": "MIT",
@@ -40,6 +40,7 @@
     "report.py",
     "requirements.txt",
     "README.md",
+    "CHANGELOG.md",
     "!**/__pycache__",
     "!**/*.pyc"
   ],
