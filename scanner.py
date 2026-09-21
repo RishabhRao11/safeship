@@ -173,6 +173,16 @@ def scan(target, config="auto", timeout=300):
             "If this was the first run with --config auto, it was probably still "
             "downloading rules -- try again, or raise the timeout."
         )
+    except OSError as exc:
+        # Windows Application Control blocks semgrep's native binary with
+        # WinError 4551, and an unexecutable interpreter surfaces here too.
+        # Converting to ScannerError is the entire reason that type exists:
+        # analyze.py degrades on it and keeps the other three engines. A bare
+        # OSError escaping this function ended the whole scan instead.
+        raise ScannerError(
+            f"Could not execute Semgrep: {exc}. On Windows this is usually an "
+            "Application Control policy blocking semgrep's native binary."
+        )
 
     # Semgrep's exit codes:
     #   0 = ran successfully (findings may or may not exist -- 0 does NOT mean clean)

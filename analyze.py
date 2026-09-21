@@ -785,13 +785,29 @@ def main():
             dependencies_engine.DependencyScanError,
         ))
 
+    def first_line(exc):
+        """First line of an exception message, or its type when it has none."""
+        lines = str(exc).strip().splitlines()
+        return lines[0] if lines else type(exc).__name__
+
     for tag, label, produce, failure in planned:
         try:
             for finding in produce():
                 finding["_engine"] = tag
                 all_findings.append(finding)
         except failure as exc:
-            reason = str(exc).strip().splitlines()[0]
+            reason = first_line(exc)
+            skipped.append((label, reason))
+            print(f"[{label} skipped] {reason}", file=sys.stderr)
+        except Exception as exc:
+            # The declared type is the failure we ANTICIPATED. Catching only that
+            # quietly reintroduces the bug this whole table exists to prevent:
+            # Semgrep raised a bare OSError (WinError 4551, Windows Application
+            # Control) which is not a ScannerError, so it escaped and took three
+            # working engines down with it -- exit 1, empty report, after the
+            # credential, dependency and config scans had already succeeded.
+            # Whatever an engine throws, it costs us that engine and nothing else.
+            reason = f"{type(exc).__name__}: {first_line(exc)}"
             skipped.append((label, reason))
             print(f"[{label} skipped] {reason}", file=sys.stderr)
 
@@ -917,6 +933,15 @@ def main():
         return
 
     if args.no_explain:
+        # The skipped-engine warning belongs here too, not only in print_report.
+        # This is the path the README points people at when they have no API key
+        # (`--no-explain`, `--secrets-only`), so it is the path most likely to be
+        # read as a clean bill of health -- which is precisely wrong when an
+        # engine never ran. It went to stderr only, which a redirect throws away.
+        for label, reason in skipped:
+            print(f"  NOT SCANNED -- {label}: {reason}")
+            print("  Findings of that kind cannot appear below. "
+                  "This is not a clean result.")
         # Compact listing: the findings exist, but nothing has judged them.
         for record in results:
             severity = record["explanation"].get("severity", "?")

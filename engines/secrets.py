@@ -236,9 +236,9 @@ PATTERNS = [
 # case-insensitively against the matched value.
 PLACEHOLDER_MARKERS = (
     "example", "changeme", "change_me", "placeholder", "your_", "your-", "yourkey",
-    "dummy", "sample", "insert", "replace", "todo", "fixme", "xxxx", "....",
+    "dummy", "sample", "insert", "replace", "todo", "fixme", "xxxx", "...",
     "<", ">", "{{", "}}", "${", "%s", "abc123", "foobar", "notarealkey",
-    "redacted", "hunter2", "password123", "123456", "test_key", "fake",
+    "redacted", "hunter2", "password", "123456", "test_key", "fake",
     # Local-only hosts. A password that only works against a database on the
     # developer's own machine is not a credential leak worth waking someone up
     # for, and "postgresql://user:password@localhost/dbname" appears in roughly
@@ -309,6 +309,62 @@ def _looks_like_placeholder(value, generic=False):
         #   CHALLENGE_PASSWORD: "challengePassword"     -- an identifier as text
         if re.fullmatch(r"[A-Za-z]+", value):
             return True
+
+        # Three more, every one of them measured on 13,107 files of installed
+        # third-party libraries rather than imagined.
+        #
+        #   szOID_RSA_challengePwd = "1.2.840.113549.1.9.7"  -- an X.509 OID.
+        # Digits and dots, never a credential. The existing dotted-identifier
+        # check misses these because it requires a letter to start.
+        if re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", value):
+            return True
+        #   token_endpoint_auth_method="private_key_jwt"     -- a method name
+        #   "adls.sas-token": "azure_storage_sas_key"        -- a config key
+        # Lowercase words joined by _ . or -, each optionally ending in digits.
+        # The separator is load-bearing: it is what distinguishes these from a
+        # real lowercase secret like 8f4c2e9a7b1d6350fae82c94d17b0e63, which has
+        # no separators, and from sk_live_51QpR7m..., whose last segment is not
+        # lowercase-alphabetic. Without the separator requirement this filter
+        # would eat genuine hex credentials.
+        if re.fullmatch(r"[a-z]+[0-9]*(?:[_.\-][a-z]+[0-9]*)+", value):
+            return True
+        #   f"AccessToken(token='{masked}')"                 -- an interpolation
+        # A value with braces is a template; the real value is computed at run
+        # time and is not in the file. PLACEHOLDER_MARKERS already has "{{" and
+        # "${" but single braces are what f-strings actually use.
+        if "{" in value and "}" in value:
+            return True
+    return False
+
+
+# A run of base64 long enough to be actual key material rather than a word.
+_PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/=]{20,}")
+
+
+def _pem_has_body(lines, lineno, line, match_end):
+    """True when real key material follows a `-----BEGIN ... PRIVATE KEY-----`.
+
+    WHY THIS EXISTS: cryptography's own ssh.py contains
+
+        _SK_START = b"-----BEGIN OPENSSH PRIVATE KEY-----"
+
+    which is the delimiter its parser looks *for*, not a key. Across 13,107
+    files of installed libraries this was the only false positive rated
+    critical -- the most expensive kind, because critical is the one a user
+    drops everything to act on.
+
+    A header on its own is a constant. A header followed by base64 is a leak.
+    Both shapes are checked: the body may sit on the same line (a one-line
+    PEM in a .env, newlines escaped) or on the next non-blank line (a real
+    key pasted into a file).
+    """
+    if _PEM_BODY_RE.search(line, match_end):
+        return True
+    for following in lines[lineno:lineno + 3]:
+        stripped = following.strip()
+        if not stripped:
+            continue
+        return bool(_PEM_BODY_RE.search(stripped))
     return False
 
 
@@ -537,6 +593,9 @@ def scan(target, min_entropy=2.0, max_file_bytes=MAX_FILE_BYTES):
 
                     is_generic = pattern.id == "generic-assigned-secret"
                     if _looks_like_placeholder(value, generic=is_generic):
+                        continue
+                    if (pattern.id == "private-key"
+                            and not _pem_has_body(lines, lineno, line, match.end())):
                         continue
                     if (pattern.confidence == "medium"
                             and _shannon_entropy(value) < min_entropy):

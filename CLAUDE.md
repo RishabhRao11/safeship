@@ -72,7 +72,7 @@ what:
 | File | What it does | State |
 |---|---|---|
 | `scanner.py` | Runs Semgrep, returns parsed findings | Works |
-| `engines/secrets.py` | Credentials in **any** text file | Works, 16/16 on fixtures |
+| `engines/secrets.py` | Credentials in **any** text file | Works, 16/16 on fixtures, 1 FP on 13,107 real files |
 | `engines/dependencies.py` | OSV.dev CVE lookup, pip + npm | Works, 9/9 on fixtures |
 | `engines/config.py` | Insecure config, 22 rules + 2 absence checks | Works, 22/22 on fixtures |
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
@@ -118,6 +118,34 @@ further filters — no whitespace, no SCREAMING_SNAKE, no leading `/` or `://`, 
 all-letter words — removed the rest. Final: **17 findings on those 12,775 files**.
 The fixtures never caught any of this, because every fixture was written as
 `NAME = "literal"`. Fixtures test the shapes you thought of.
+
+Benchmarking against `detect-secrets` forced a second round on the same corpus
+(13,107 files after installing the benchmark tools), where 19 of 20 remaining
+findings were still false. Four more filters, each written against a line that
+was actually read rather than imagined:
+
+| Shape | Real example | Why it is not a credential |
+|---|---|---|
+| numeric dotted | `szOID_RSA_challengePwd = "1.2.840.113549.1.9.7"` | an X.509 OID |
+| separator-joined words | `token_endpoint_auth_method="private_key_jwt"` | a method name |
+| braces | `f"AccessToken(token='{masked}')"` | an f-string template |
+| PEM header, no body | `_SK_START = b"-----BEGIN OPENSSH PRIVATE KEY-----"` | the delimiter a parser looks *for* |
+
+**Result: 20 → 1 on the corpus, 16/16 recall unchanged.** The survivor is a
+genuine JWT in PyJWT's own README — a correct detection that is not actionable,
+and deliberately left alone rather than special-cased.
+
+Two details in there are load-bearing. The separator requirement is what keeps
+`private_key_jwt` filtered while `8f4c2e9a7b1d6350fae82c94d17b0e63` still fires:
+drop it and the filter eats genuine lowercase hex secrets. And the PEM check
+needs a *lookahead* for base64 body, because the header alone was the only
+**critical** false positive in the whole corpus — the most expensive kind, since
+critical is the one a user drops everything to act on.
+
+Worth noting what did **not** need fixing: across all 13,107 files the 22
+provider-format patterns (AWS, Stripe, GitHub, Slack, Google, OpenAI) produced
+**zero** false positives. Every one came from the single generic catch-all rule.
+That is the argument against generic high-entropy detection, restated as data.
 
 **Snippets extend to the enclosing function, not a fixed line count.**
 `find_enclosing_start()` walks up from the finding to the first line that both
@@ -292,6 +320,28 @@ engines. Every engine is now collected in `skipped` and named at the top of the
 report, and in the zero-findings path first of all: "no findings" plus a silently
 absent engine reads as a clean bill of health for checks nobody performed.
 
+**That claim was false for eight months, and a benchmark run caught it.** On
+2026-09-20 the Application Control block returned and `analyze.py` exited 1 with
+an empty report, after the credential, dependency and config scans had already
+succeeded. Two causes, both fixed:
+
+- `scanner.py` caught `TimeoutExpired` and `JSONDecodeError` but not `OSError`,
+  so `WinError 4551` never became a `ScannerError` — the one type the degradation
+  path recognises. Converting it is the entire reason that exception class exists.
+- The `planned` loop caught only each engine's **declared** exception type. That
+  is the bug the table was built to prevent, reintroduced by being too specific:
+  an unanticipated failure is exactly the one that escapes a narrow `except`.
+  It now also catches `Exception`, names the type, and keeps going.
+
+A third gap surfaced while verifying: `--no-explain` printed its compact listing
+and returned **without** the `NOT SCANNED` warning, which went to stderr only and
+vanishes under a redirect. That is the path the README sends people to when they
+have no API key — the likeliest of all to be misread as a clean bill of health.
+
+The lesson is narrower than "add error handling": *the degradation path needs a
+test that actually breaks an engine.* All three of these survived because the
+engines kept working, and the path only runs when one stops.
+
 ## Known gaps
 
 - **Semgrep intermittently dies under Windows Application Control.**
@@ -306,6 +356,56 @@ absent engine reads as a clean bill of health for checks nobody performed.
   Every regex in both rule files is anchored or `.*`-wrapped for this reason.
 
 ---
+
+## Benchmarked against other tools
+
+Run 2026-09-20. Every number before this was self-generated, which is worth
+exactly as much as a fixture you wrote yourself.
+
+**Dependencies**, on `test_targets/deps/` — 6 vulnerable PyPI, 3 npm:
+
+| | PyPI | npm | FPs |
+|---|---|---|---|
+| `pip-audit` 2.10.1 | **0/6 — errored out** | n/a | — |
+| `npm audit` 11.6.2 | n/a | 3/3 | 0 |
+| SafeShip | 6/6 | 3/3 | 0 |
+
+`pip-audit` audits an environment it must first *resolve*, and failed twice for
+different reasons: `cryptography==2.3` has no Python 3.14 wheel and fails to
+build, and with it removed `requests==2.19.1` pins `urllib3<1.24` against the
+pinned `urllib3==1.24.1` → `ResolutionImpossible`. It is not broken — it reported
+6 advisories for `jinja2==2.10` alone. The point is structural: **a
+requirements.txt written by an AI from memory is often unresolvable, and that is
+precisely this tool's input.** Reading the file and querying OSV needs no resolve.
+
+Fair to both: `pip-audit` and `npm audit` cover **transitive** dependencies and
+SafeShip does not. That is a real gap in their favour. `npm audit` also needs a
+lockfile, which had to be generated first.
+
+**Secrets**, on `test_targets/secrets/` — 16 planted credentials:
+
+| | recall | FPs |
+|---|---|---|
+| `detect-secrets` 1.5.0 | 8/16 | 4 |
+| SafeShip | 16/16 | 0 |
+
+All four of its unique findings are false, and the inversion is almost too neat:
+it flagged `AKIAIOSFODNN7EXAMPLE` in `.env.example` and **missed the real AWS key
+in `.env`**. It also flagged both `pk_live_` publishable keys, which are designed
+to ship. It missed the `sk_live_` secret key and the Slack token entirely.
+
+**Secrets, on code neither tool was written for** — 13,107 files of installed
+third-party libraries. This is the run that matters, and before the filter work
+it went the other way:
+
+| | before | after |
+|---|---|---|
+| `detect-secrets` | 0 | 0 |
+| SafeShip | **20** (~19 false) | **1** |
+
+Losing 20–0 on the tool's own stated governing constraint is the most useful
+thing the benchmark produced. Keep re-running both halves; the corpus is just
+`site-packages`, and it grows on its own as you install things.
 
 ## How to work on this
 

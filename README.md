@@ -34,6 +34,42 @@ Those custom rules are the point. Against Semgrep's default registry alone:
 | Python | 4/7 | **7/7** |
 | JavaScript | 2/11 | **11/11** |
 
+## Measured against other tools
+
+Not self-reported fixture scores — the same inputs, run through the tools people
+actually use.
+
+**Credentials**, on a fixture of 16 planted secrets plus two files of correct code
+that must stay silent:
+
+| | found | false positives |
+|---|---|---|
+| `detect-secrets` 1.5.0 | 8/16 | 4 |
+| **SafeShip** | **16/16** | **0** |
+
+`detect-secrets` flagged the AWS key in `.env.example` and missed the real one in
+`.env`. It flagged two Stripe *publishable* keys, which are designed to ship, and
+missed the `sk_live_` secret key.
+
+**Dependencies**, on 6 vulnerable PyPI and 3 vulnerable npm packages:
+
+| | found |
+|---|---|
+| `pip-audit` 2.10.1 | 0/6 — could not resolve the file |
+| `npm audit` 11.6.2 | 3/3 |
+| **SafeShip** | **9/9** |
+
+`pip-audit` has to resolve and build an environment before it can audit one. A
+`requirements.txt` an AI wrote from memory often cannot be resolved at all — here
+two pinned versions contradicted each other — and you get an error instead of
+findings. SafeShip reads the file and asks OSV.
+
+**Where they beat SafeShip:** `pip-audit` and `npm audit` both check
+**transitive** dependencies. SafeShip only reads what you declared. And on 13,107
+files of installed third-party libraries, `detect-secrets` reports 0 false
+positives to SafeShip's 1 — that gap used to be 0 to 20, and closing it is what
+[CLAUDE.md](CLAUDE.md) spends its longest section on.
+
 ## Design decisions worth knowing
 
 **Your source never leaves your machine.** There is no upload, no account, no
