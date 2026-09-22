@@ -111,21 +111,43 @@ jobs:
           printf 'AWS_ACCESS_KEY_ID=AKIA3XQ7NVBW2LFDR5TC\nDEBUG=True\n' > ../ci-target/.env
           printf '{ "dependencies": { "minimist": "1.2.0" } }\n' > ../ci-target/package.json
 
-      # Deliberately verbose. The first run failed here on windows only, and a
-      # bare pipe into tee reports nothing about why: the output is swallowed
-      # and only the exit code survives. Capture both, print both, then exit
-      # with the real code so the step still fails when the scan fails.
+      # Deliberately verbose, and it publishes itself as an ANNOTATION on
+      # failure. Downloading Actions logs needs admin rights on the repo even
+      # when it is public, so a maintainer without a token cannot read why a
+      # step failed. Annotations are served by the API to anyone. Emitting the
+      # diagnosis as one turns "exit code 1" into something anybody can act on.
+      #
+      # The interpreter probe is the point of the windows half of this matrix:
+      # `py -3` resolves through the Windows registry while setup-python works
+      # by prepending to PATH, so the launcher can hand back a DIFFERENT
+      # interpreter than the one that got `pip install -r requirements.txt`.
       - name: Scan it
         run: |
-          echo "cwd:        $(pwd)"
-          echo "interpreter:"; node -e "console.log(process.platform, process.version)"
-          echo "target:"; ls -la ../ci-target
           set +e
+          {
+            echo "cwd:              $(pwd)"
+            echo "platform:         $(node -e 'console.log(process.platform, process.version)')"
+            echo "python (PATH):    $(python -c 'import sys; print(sys.executable)' 2>&1)"
+            echo "py -3:            $(py -3 -c 'import sys; print(sys.executable)' 2>&1)"
+            echo "anthropic@PATH:   $(python -c 'import anthropic; print(anthropic.__version__)' 2>&1)"
+            echo "anthropic@py -3:  $(py -3 -c 'import anthropic; print(anthropic.__version__)' 2>&1)"
+            echo "target:"; ls -la ../ci-target
+          } > diag.log 2>&1
+          cat diag.log
+
           node bin/safeship.js scan ../ci-target --no-explain > scan.log 2>&1
           code=$?
           set -e
+
           echo "--- safeship exit code: $code ---"
           cat scan.log
+
+          if [ "$code" -ne 0 ]; then
+            # Workflow commands need %, CR and LF percent-encoded, in that order.
+            payload=$(cat diag.log scan.log | tail -40 \
+              | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g')
+            echo "::error title=safeship scan failed (exit ${code})::${payload}"
+          fi
           exit $code
 
       # The AWS pattern is matched loosely on purpose. Semgrep's registry also
