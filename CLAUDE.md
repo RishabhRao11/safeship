@@ -313,15 +313,33 @@ push on pattern shape alone — allowlist the paths rather than weakening them.
 
 ## Tests
 
-Two, both standalone, both exit 0/1 so they drop into CI unchanged:
+Three, all standalone, all exit 0/1:
 
 ```bash
-python test_report_escaping.py   # the HTML report cannot be made to execute code
+python test_fixtures.py          # every count in this file, as an assertion
 python test_degradation.py       # one engine failing costs you that engine only
+python test_report_escaping.py   # the HTML report cannot be made to execute code
 ```
 
-Each exists because of a real failure, not for coverage. Run both after touching
-`report.py`, `scanner.py`, or the engine loop in `analyze.py`.
+Each exists because of a real failure, not for coverage.
+
+`test_fixtures.py` **skips** the Semgrep checks when Semgrep cannot run, and
+`SAFESHIP_REQUIRE_SEMGREP=1` makes that skip fatal. CI sets it. This is the
+answer to the Application Control gap below: locally you get an honest "not
+verified", and on Linux the rules are actually exercised on every push. A skip
+nobody notices is indistinguishable from a pass, so it is counted and printed.
+
+## CI
+
+`.github/workflows/ci.yml` — push, PR, and **weekly**. The schedule is not
+decoration: OSV.dev publishes new advisories and Semgrep releases change how
+rules match, so a green build in September is not evidence about October.
+
+Two jobs. `tests` runs all three suites on Python 3.9 (the floor the README
+promises) and 3.13. `cli` runs `bin/safeship.js` on ubuntu **and windows** --
+Windows because the interpreter probe tries `py -3` first and that branch never
+runs on Linux -- scanning a throwaway project created *outside* the repo, which
+is the only arrangement that can catch the `cwd` bug coming back.
 
 ---
 

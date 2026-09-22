@@ -1,5 +1,8 @@
 # SafeShip
 
+[![CI](https://github.com/RishabhRao11/safeship/actions/workflows/ci.yml/badge.svg)](https://github.com/RishabhRao11/safeship/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/safeship)](https://www.npmjs.com/package/safeship)
+
 Security scanner for vibe-coded projects — the ones written mostly by an AI, shipped
 mostly on trust.
 

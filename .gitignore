@@ -13,3 +13,9 @@ report.html
 
 # npm pack output
 *.tgz
+
+# Scan output: the CLI writes this wherever it is run, including here.
+# It embeds redacted credentials and file paths from whatever was scanned.
+safeship-report.html
+*.html
+!docs/*.html

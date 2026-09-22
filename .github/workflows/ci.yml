@@ -1,0 +1,126 @@
+# CI for SafeShip.
+#
+# The point of running this on Linux is not redundancy. Semgrep is blocked by
+# Windows Application Control on the development machine for days at a time,
+# which means the rule counts silently go unverified while the three
+# pure-Python engines keep working and everything looks fine. Here it runs on a
+# machine with no such policy, with SAFESHIP_REQUIRE_SEMGREP=1 so a skipped
+# Semgrep check is a failure rather than a quiet "not checked".
+#
+# Every suite exits 0/1 and prints what it verified, so the log is readable
+# without opening the code.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly, because two of the things under test drift on their own: OSV.dev
+  # publishes new advisories, and a Semgrep release can change how a rule
+  # matches. A green build on Friday is not evidence about the following month.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: tests (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor the README promises; 3.13 is what people actually
+        # have. Testing only one of them makes the other claim untested.
+        python: ["3.9", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Report toolchain
+        run: |
+          python --version
+          semgrep --version
+
+      # Fixture counts: 16/16 secrets, 22/0 config, 9/9 deps, 7 Python rules,
+      # 11 JS findings, zero on both safe fixtures.
+      - name: Fixture regressions
+        env:
+          SAFESHIP_REQUIRE_SEMGREP: "1"
+        run: python test_fixtures.py
+
+      # One engine failing must cost that engine and nothing else.
+      - name: Degradation contracts
+        run: python test_degradation.py
+
+      # The HTML report must not be able to execute attacker-controlled text.
+      - name: Report escaping
+        run: python test_report_escaping.py
+
+  cli:
+    name: npx CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is not decoration: bin/safeship.js has a Windows-specific
+        # interpreter probe (`py -3` before `python`), and that branch is
+        # exactly the one the maintainer's own machine cannot fail to exercise
+        # and Linux never runs.
+        os: [ubuntu-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Toolchain preflight
+        run: node bin/safeship.js doctor
+
+      # Scan a project OUTSIDE the repo. Running it from inside proves nothing:
+      # an earlier version set cwd on the spawn and scanned the installed
+      # package instead of the user's project, and both paths happen to work
+      # when they are the same directory.
+      - name: Build a throwaway target
+        run: |
+          mkdir -p ../ci-target
+          printf 'AWS_ACCESS_KEY_ID=AKIA3XQ7NVBW2LFDR5TC\nDEBUG=True\n' > ../ci-target/.env
+          printf '{ "dependencies": { "minimist": "1.2.0" } }\n' > ../ci-target/package.json
+
+      - name: Scan it
+        run: node bin/safeship.js scan ../ci-target --no-explain | tee scan.log
+
+      # The AWS pattern is matched loosely on purpose. Semgrep's registry also
+      # has a rule for AWS keys, and when both it and the secrets engine fire on
+      # one line the dedupe keeps whichever came first -- so the surviving rule
+      # id is `secrets.aws-access-key-id` or `detected-aws-access-key-id-value`
+      # depending on whether Semgrep was able to run. This step exists to prove
+      # the CLI reaches a project outside the repo, not to pin that race.
+      - name: Assert it found the planted problems
+        run: |
+          grep -q "aws-access-key-id"      scan.log || { echo "MISSING: the planted AWS key"; exit 1; }
+          grep -q "config.env-debug-flag"  scan.log || { echo "MISSING: the planted DEBUG flag"; exit 1; }
+          grep -q "dependencies.npm-known" scan.log || { echo "MISSING: the planted vulnerable dependency"; exit 1; }
+          echo "All three engines reported on a project outside the repo."
