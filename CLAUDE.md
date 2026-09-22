@@ -311,6 +311,18 @@ they are how false-positive regressions get caught.
 Fixture credentials are fake but format-valid. GitHub push protection may block a
 push on pattern shape alone — allowlist the paths rather than weakening them.
 
+## Tests
+
+Two, both standalone, both exit 0/1 so they drop into CI unchanged:
+
+```bash
+python test_report_escaping.py   # the HTML report cannot be made to execute code
+python test_degradation.py       # one engine failing costs you that engine only
+```
+
+Each exists because of a real failure, not for coverage. Run both after touching
+`report.py`, `scanner.py`, or the engine loop in `analyze.py`.
+
 ---
 
 **One engine failing degrades the scan; it does not end it.** Found by running
@@ -341,6 +353,29 @@ have no API key — the likeliest of all to be misread as a clean bill of health
 The lesson is narrower than "add error handling": *the degradation path needs a
 test that actually breaks an engine.* All three of these survived because the
 engines kept working, and the path only runs when one stops.
+
+**`test_degradation.py` is that test**, written 2026-09-22. It monkeypatches a
+real engine to raise, then drives the real `main()` -- not a copy of the loop,
+because a test that models the code cannot catch the code diverging from the
+model. Four contracts:
+
+| Contract | Guards |
+|---|---|
+| `scanner.scan` converts `OSError` into `ScannerError` | bug 1 |
+| An **undeclared** exception costs one engine, and names the type | bug 2 |
+| A **declared** exception is still handled | that broadening did not replace the narrow path |
+| Total failure raises, and never prints "No findings" | the false clean bill of health |
+
+The third one matters as much as the second. Widening an `except` is exactly the
+kind of change that silently swallows the specific handler it was meant to
+supplement.
+
+**Every check was verified by putting the bug back.** Each fix was deleted in
+turn and the suite re-run; all three mutations were caught, and the `--no-explain`
+one produced the diagnosis in words -- "stderr only; `safeship scan --no-explain
+> report.txt` then reads as clean". A green test proves nothing until you have
+watched it go red. If you add a fifth contract here, mutate the code it covers
+before believing it.
 
 ## Known gaps
 
