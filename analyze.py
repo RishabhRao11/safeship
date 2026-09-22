@@ -39,7 +39,6 @@ import re
 import sys
 from collections import Counter
 
-import explainer
 import report
 import scanner
 # Aliased because `secrets` is also a standard-library module. Importing ours
@@ -896,6 +895,19 @@ def main():
             continue
 
         if client is None:
+            # Imported here, not at module scope, because explainer.py imports
+            # the anthropic SDK at ITS module scope -- so a top-level
+            # `import explainer` made the SDK mandatory for every run. The
+            # README says the API key is optional and that --secrets-only is
+            # the offline path; that was true of the key and false of the
+            # package. CI caught it on windows, where `py -3` resolved to a
+            # different interpreter than the one pip installed into and
+            # analyze.py died on import before a single engine ran.
+            #
+            # anthropic_client() already deferred its own import for this
+            # reason. This line is what actually makes that work.
+            import explainer
+
             client = anthropic_client()
 
         if path not in sources:

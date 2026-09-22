@@ -317,7 +317,7 @@ Three, all standalone, all exit 0/1:
 
 ```bash
 python test_fixtures.py          # every count in this file, as an assertion
-python test_degradation.py       # one engine failing costs you that engine only
+python test_degradation.py       # failure paths: 5 contracts, all mutation-verified
 python test_report_escaping.py   # the HTML report cannot be made to execute code
 ```
 
@@ -351,6 +351,42 @@ for having it.
   other things". The floor is now 3.10 in `bin/safeship.js`, the README, and the
   matrix. The three pure-Python engines would still run on 3.9; Semgrep is what
   sets the floor, and claiming otherwise was the bug.
+
+- **The windows CLI job failed for a second, unrelated reason, and it took
+  three runs to read.** Downloading Actions logs returns 403 "Must have admin
+  rights to Repository" even on a public repo, so the step now publishes its own
+  diagnosis as an `::error::` annotation -- annotations are served by the API to
+  anyone. Keep that. A red build nobody can read is barely better than no build.
+
+  What it said:
+
+      python (PATH): hostedtoolcache/Python/3.13.15  ->  anthropic 1.8.0
+      py -3:         hostedtoolcache/Python/3.14.7   ->  ModuleNotFoundError
+
+  `py -3` resolves through the Windows registry; pip installs into whatever is
+  on PATH. They are routinely different interpreters. The preflight checked the
+  *version* of the one it picked and the *presence* of semgrep found via PATH --
+  from the other interpreter -- printed "Everything safeship needs is present",
+  and then `analyze.py` died on import before a single engine ran.
+
+  Two fixes, and the second one matters more:
+
+  1. `findPython()` now **prefers** a candidate that can `import anthropic`
+     rather than taking the first that satisfies the version check. Importing
+     the SDK is the best available proxy for "this is the Python the user
+     actually ran pip install with". It still falls back to a version-valid
+     interpreter and warns, because three engines need no SDK at all.
+  2. `analyze.py` no longer imports `explainer` at module scope. It imports the
+     anthropic SDK at *its* module scope, so one top-level import made the SDK
+     mandatory for every run -- including `--secrets-only`, which the README
+     calls the offline path. **The key was optional; the package was not.**
+     `anthropic_client()` had already deferred its own import for this reason;
+     the top-level `import explainer` silently defeated it.
+
+  This is the fifth contract in `test_degradation.py`, and it runs in a
+  subprocess because the failure was at import time and a test that has already
+  imported `analyze` cannot observe it. Mutation-verified: putting the
+  top-level import back turns it red.
 
 ---
 
@@ -509,6 +545,12 @@ what to install. `safeship doctor` runs the same checks alone.
 `MIN_PYTHON` is **3.10**, and it is Semgrep's floor rather than ours -- see the
 CI section. Do not lower it back to 3.9 to be generous: pip will happily install
 an old semgrep there and the scan will quietly find different things.
+
+**A version check is not a usability check.** `findPython()` prefers an
+interpreter that can `import anthropic`, because on Windows `py -3` and the
+`python` on PATH are frequently different installs and only one of them has the
+dependencies. Picking by version alone produced a preflight that said everything
+was present and a scan that died on import.
 
 Two things that were wrong and are easy to reintroduce:
 

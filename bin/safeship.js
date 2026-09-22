@@ -46,6 +46,7 @@ const bold = (s) => (process.stdout.isTTY ? `\x1b[1m${s}\x1b[0m` : s);
 const dim = (s) => (process.stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
 const red = (s) => (process.stdout.isTTY ? `\x1b[31m${s}\x1b[0m` : s);
 const green = (s) => (process.stdout.isTTY ? `\x1b[32m${s}\x1b[0m` : s);
+const yellow = (s) => (process.stdout.isTTY ? `\x1b[33m${s}\x1b[0m` : s);
 
 function run(cmd, args, opts) {
   return spawnSync(cmd, args, { encoding: 'utf8', ...opts });
@@ -55,7 +56,26 @@ function run(cmd, args, opts) {
 /* Preflight                                                              */
 /* ---------------------------------------------------------------------- */
 
+// Can this interpreter import the optional SDK? Used as a tie-break, because
+// it is the best available signal for "this is the Python the user actually
+// ran pip install with".
+function hasSdk(python) {
+  return run(python.cmd, [...python.baseArgs, '-c', 'import anthropic']).status === 0;
+}
+
 function findPython() {
+  // WHY THIS PREFERS RATHER THAN TAKES THE FIRST MATCH
+  //   On Windows `py -3` resolves through the registry while pip installs into
+  //   whichever interpreter is on PATH. Those are often not the same one. CI
+  //   caught it on a clean runner:
+  //
+  //     python (PATH): hostedtoolcache/Python/3.13.15  ->  anthropic 1.8.0
+  //     py -3:         hostedtoolcache/Python/3.14.7   ->  ModuleNotFoundError
+  //
+  //   The old code took `py -3` because it came first and satisfied the version
+  //   check, reported "everything safeship needs is present", and then died on
+  //   an import. Version is not the only thing that makes an interpreter usable.
+  let fallback = null;
   for (const [cmd, baseArgs] of PYTHON_CANDIDATES) {
     const probe = run(cmd, [
       ...baseArgs, '-c', 'import sys;print("%d.%d" % sys.version_info[:2])',
@@ -65,13 +85,18 @@ function findPython() {
     const [major, minor] = probe.stdout.trim().split('.').map(Number);
     if (major > MIN_PYTHON[0]
         || (major === MIN_PYTHON[0] && minor >= MIN_PYTHON[1])) {
-      return { cmd, baseArgs, version: `${major}.${minor}` };
+      const candidate = { cmd, baseArgs, version: `${major}.${minor}` };
+      if (hasSdk(candidate)) return candidate;
+      // Usable for the three engines that need no SDK. Keep it, but keep
+      // looking for one that is equipped for everything.
+      if (!fallback) fallback = candidate;
+      continue;
     }
     // Found, but too old. Keep looking -- a newer one may be further down the
     // list -- and remember this so the error can name the version we saw.
     findPython.tooOld = `${cmd} (Python ${major}.${minor})`;
   }
-  return null;
+  return fallback;
 }
 
 function checkSemgrep(python) {
@@ -117,6 +142,18 @@ function preflight({ quiet } = {}) {
     return null;
   }
   if (!quiet) console.log(dim(`semgrep at ${semgrep}`));
+
+  // Not fatal: three of four engines never touch the SDK, and --no-explain and
+  // --secrets-only are the documented paths for exactly this. But saying
+  // nothing is how a run gets all the way through a scan and then dies on an
+  // import, throwing the results away.
+  if (!hasSdk(python)) {
+    console.error(yellow('\nThe anthropic SDK is not installed for this Python.'));
+    console.error('AI explanations need it. Everything else -- credentials,');
+    console.error('dependencies, configuration -- does not.\n');
+    console.error(installHint(python));
+    console.error('\nOr run with --no-explain to skip the explanations.');
+  }
 
   return python;
 }

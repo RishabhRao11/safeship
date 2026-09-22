@@ -33,7 +33,10 @@ Exit code is 0 on pass, 1 on failure, so it drops into CI unchanged.
 
 import contextlib
 import io
+import os
+import subprocess
 import sys
+import textwrap
 
 import analyze
 import scanner
@@ -196,11 +199,59 @@ def check_total_failure_is_loud(failures):
         )
 
 
+def check_offline_path_needs_no_sdk(failures):
+    """The documented offline path must not require the anthropic SDK.
+
+    The README says the API key is optional and points at `--no-explain` and
+    `--secrets-only`. That was true of the *key* and false of the *package*:
+    analyze.py imported explainer at module scope, explainer imports anthropic
+    at module scope, so every run needed the SDK installed -- including the
+    three engines that never call it.
+
+    CI found this on windows, where `py -3` resolved to a different interpreter
+    than the one pip installed into. analyze.py died on import, before a single
+    engine ran, with a raw ModuleNotFoundError rather than the preflight's
+    "here is what to install".
+
+    Run in a subprocess on purpose. The failure was at import time, and a test
+    that has already imported analyze cannot observe it.
+    """
+    source = textwrap.dedent(
+        '''
+        import sys
+
+        class BlockAnthropic:
+            def find_spec(self, name, path=None, target=None):
+                if name == "anthropic" or name.startswith("anthropic."):
+                    raise ImportError("No module named 'anthropic'")
+                return None
+
+        sys.meta_path.insert(0, BlockAnthropic())
+        sys.argv = ["analyze.py", {target!r}, "--no-explain", "--no-semgrep", "--no-deps"]
+        import analyze
+        analyze.main()
+        '''
+    ).format(target=TARGET)
+
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        capture_output=True, text=True,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout).strip().splitlines()
+        failures.append(
+            "the offline path still requires the anthropic SDK: "
+            f"exit {result.returncode} -- {tail[-1] if tail else '(no output)'}"
+        )
+
+
 CHECKS = (
     ("scanner converts OSError into ScannerError", check_scanner_converts_oserror),
     ("an undeclared failure costs one engine only", check_undeclared_failure_keeps_other_engines),
     ("a declared failure is still handled", check_declared_failure_still_handled),
     ("total failure is loud, not 'No findings'", check_total_failure_is_loud),
+    ("the offline path runs without the anthropic SDK", check_offline_path_needs_no_sdk),
 )
 
 

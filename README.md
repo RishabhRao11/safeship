@@ -124,7 +124,8 @@ python -m pip install -r requirements.txt
 
 An `ANTHROPIC_API_KEY` is optional. Without one, use `--no-explain` or
 `--secrets-only`; you still get every credential, dependency, and configuration
-finding.
+finding. The `anthropic` package is optional on the same terms -- those paths
+run without it installed at all.
 
 ## Status
 
