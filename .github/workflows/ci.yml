@@ -30,9 +30,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is the floor the README promises; 3.13 is what people actually
-        # have. Testing only one of them makes the other claim untested.
-        python: ["3.9", "3.13"]
+        # 3.10 is the floor, and it is Semgrep's floor rather than ours:
+        # the three pure-Python engines are happy on 3.9, but pip on 3.9
+        # resolves semgrep to ~1.136 and the rule counts move. The first CI
+        # run failed here, which is exactly what the matrix is for.
+        python: ["3.10", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -109,8 +111,22 @@ jobs:
           printf 'AWS_ACCESS_KEY_ID=AKIA3XQ7NVBW2LFDR5TC\nDEBUG=True\n' > ../ci-target/.env
           printf '{ "dependencies": { "minimist": "1.2.0" } }\n' > ../ci-target/package.json
 
+      # Deliberately verbose. The first run failed here on windows only, and a
+      # bare pipe into tee reports nothing about why: the output is swallowed
+      # and only the exit code survives. Capture both, print both, then exit
+      # with the real code so the step still fails when the scan fails.
       - name: Scan it
-        run: node bin/safeship.js scan ../ci-target --no-explain | tee scan.log
+        run: |
+          echo "cwd:        $(pwd)"
+          echo "interpreter:"; node -e "console.log(process.platform, process.version)"
+          echo "target:"; ls -la ../ci-target
+          set +e
+          node bin/safeship.js scan ../ci-target --no-explain > scan.log 2>&1
+          code=$?
+          set -e
+          echo "--- safeship exit code: $code ---"
+          cat scan.log
+          exit $code
 
       # The AWS pattern is matched loosely on purpose. Semgrep's registry also
       # has a rule for AWS keys, and when both it and the secrets engine fire on

@@ -113,7 +113,8 @@ npx safeship doctor                   # check the toolchain is installed
 
 ## Requirements
 
-Node 16+, and **Python 3.9+** — the scanning core is Python because Semgrep is.
+Node 16+, and **Python 3.10+** — the scanning core is Python because Semgrep is,
+and Semgrep itself requires 3.10 or newer.
 `npx safeship doctor` checks both and tells you exactly what to install. If Semgrep
 is missing:
 

@@ -335,11 +335,22 @@ nobody notices is indistinguishable from a pass, so it is counted and printed.
 decoration: OSV.dev publishes new advisories and Semgrep releases change how
 rules match, so a green build in September is not evidence about October.
 
-Two jobs. `tests` runs all three suites on Python 3.9 (the floor the README
-promises) and 3.13. `cli` runs `bin/safeship.js` on ubuntu **and windows** --
-Windows because the interpreter probe tries `py -3` first and that branch never
-runs on Linux -- scanning a throwaway project created *outside* the repo, which
-is the only arrangement that can catch the `cwd` bug coming back.
+Two jobs. `tests` runs all three suites on Python 3.10 and 3.13. `cli` runs
+`bin/safeship.js` on ubuntu **and windows** -- Windows because the interpreter
+probe tries `py -3` first and that branch never runs on Linux -- scanning a
+throwaway project created *outside* the repo, which is the only arrangement that
+can catch the `cwd` bug coming back.
+
+**The first CI run went red, and both failures were real.** That is the argument
+for having it.
+
+- **Python 3.9 was never actually supported.** The README promised 3.9+ and the
+  CLI enforced it, but Semgrep requires >=3.10 as of 1.137 -- so on 3.9 pip
+  quietly resolves semgrep to ~1.136, a different engine whose rule matching
+  moves the fixture counts. "Supported" meant "installs, and silently finds
+  other things". The floor is now 3.10 in `bin/safeship.js`, the README, and the
+  matrix. The three pure-Python engines would still run on 3.9; Semgrep is what
+  sets the floor, and claiming otherwise was the bug.
 
 ---
 
@@ -491,9 +502,13 @@ thing the benchmark produced. Keep re-running both halves; the corpus is just
 `npx` reaches the audience that ships AI-built products — Next.js and Express —
 and needs no install step. The core is Python because Semgrep is Python, and
 that combination has exactly one honest failure mode: npx promises zero-install
-and then hits a missing interpreter. So `bin/safeship.js` checks Python (3.9+,
+and then hits a missing interpreter. So `bin/safeship.js` checks Python (3.10+,
 trying `py -3` first on Windows) and Semgrep before doing anything, and names
 what to install. `safeship doctor` runs the same checks alone.
+
+`MIN_PYTHON` is **3.10**, and it is Semgrep's floor rather than ours -- see the
+CI section. Do not lower it back to 3.9 to be generous: pip will happily install
+an old semgrep there and the scan will quietly find different things.
 
 Two things that were wrong and are easy to reintroduce:
 

@@ -29,7 +29,11 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '..');
-const MIN_PYTHON = [3, 9];
+// Semgrep requires >=3.10 as of 1.137. On 3.9 pip silently resolves to
+// semgrep ~1.136, a different engine that matches rules differently --
+// so "supported" would mean "installs, and quietly finds other things".
+// CI caught this: the 3.9 job failed the fixture counts, not an import.
+const MIN_PYTHON = [3, 10];
 const DEFAULT_REPORT = 'safeship-report.html';
 
 // Candidate interpreters, best first. `py -3` is the Windows launcher, which is
@@ -91,7 +95,7 @@ function installHint(python) {
 function preflight({ quiet } = {}) {
   const python = findPython();
   if (!python) {
-    console.error(red('safeship needs Python 3.9 or newer, and could not find it.'));
+    console.error(red('safeship needs Python 3.10 or newer, and could not find it.'));
     if (findPython.tooOld) {
       console.error(`Found ${findPython.tooOld}, which is too old.`);
     }
