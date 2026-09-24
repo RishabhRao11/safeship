@@ -549,6 +549,165 @@ def _shift_severity(severity, downgrade):
 # The scan
 # ---------------------------------------------------------------------------
 
+# A repo with more historical blobs than this is not the audience for this tool,
+# and streaming all of them through cat-file stops being instant. Hitting the cap
+# produces a visible finding rather than a quietly shorter report.
+MAX_HISTORY_BLOBS = 20000
+
+
+def _git(root, args, binary=False):
+    """Run a git command in `root`. Returns None when the command fails.
+
+    A missing git executable raises instead, because that is a broken toolchain
+    and the user should be told. A non-zero exit is ordinary -- "not a
+    repository" comes back that way -- and the caller decides what it means.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root] + args,
+            capture_output=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        raise SecretScanError(
+            "git is not installed or not on PATH, so history cannot be scanned."
+        )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout if binary else proc.stdout.decode("utf-8", "replace")
+
+
+def _blobs_only_in_history(root):
+    """Blob SHAs that exist in history but not in the current commit.
+
+    WHY THE DIFFERENCE, AND NOT EVERY BLOB
+        A credential still present at HEAD is already reported by the
+        working-tree scan, and reporting it twice under two headings teaches the
+        reader that the history section is noise. What history scanning uniquely
+        answers is the opposite case: *the secret you deleted*. Removing a key
+        from a file and committing the removal looks like a fix and is not one --
+        the old blob is still in the object store, still in every clone, and
+        still recoverable by anyone who has ever pulled.
+
+        That is also the case people get wrong most confidently, because the
+        file looks clean when they check.
+
+    Returns (blobs, current_blobs, truncated). `blobs` is a list of
+    (sha, path); `current_blobs` is the same for what HEAD holds, which the
+    caller needs in order to exclude credentials by VALUE as well as by blob.
+    """
+    everything = _git(root, ["rev-list", "--objects", "--all"])
+    if everything is None:
+        return None, None, False
+
+    current, current_blobs = set(), []
+    head = _git(root, ["ls-tree", "-r", "HEAD"])
+    if head:
+        for line in head.splitlines():
+            # "<mode> blob <sha>\t<path>"
+            meta, _, path = line.partition("\t")
+            parts = meta.split()
+            if len(parts) >= 3 and parts[1] == "blob":
+                current.add(parts[2])
+                current_blobs.append((parts[2], path))
+
+    blobs, seen = [], set()
+    for line in everything.splitlines():
+        sha, _, path = line.partition(" ")
+        # Commits and trees appear here too; they have no path attached.
+        if not path or sha in current or sha in seen:
+            continue
+        seen.add(sha)
+        blobs.append((sha, path))
+
+    truncated = len(blobs) > MAX_HISTORY_BLOBS
+    return blobs[:MAX_HISTORY_BLOBS], current_blobs, truncated
+
+
+def _read_blobs(root, shas):
+    """Stream blob contents via one `git cat-file --batch`, not one call each."""
+    if not shas:
+        return {}
+    proc = subprocess.Popen(
+        ["git", "-C", root, "cat-file", "--batch"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        proc.stdin.write(("\n".join(shas) + "\n").encode())
+        proc.stdin.close()
+        out = {}
+        for _ in shas:
+            header = proc.stdout.readline()
+            if not header:
+                break
+            parts = header.decode("utf-8", "replace").split()
+            if len(parts) < 3:
+                continue
+            sha, kind, size = parts[0], parts[1], int(parts[2])
+            payload = proc.stdout.read(size)
+            proc.stdout.read(1)  # trailing newline
+            if kind == "blob" and size <= MAX_FILE_BYTES:
+                out[sha] = payload
+        return out
+    finally:
+        proc.stdout.close()
+        proc.wait(timeout=60)
+
+
+def _commit_for_blob(root, sha):
+    """The commit that INTRODUCED this blob, as (short_sha, iso_date).
+
+    `git log --find-object` lists every commit where the blob entered or left,
+    newest first -- so taking the first one names the commit that *removed* the
+    credential. Reporting "committed in <the commit that deleted it>" is worse
+    than reporting nothing: it sends someone to the wrong place in the history
+    and makes the tool look wrong about the thing it is warning them about.
+    The oldest entry is the one that added it.
+    """
+    out = _git(root, ["log", "--all", "--find-object", sha,
+                      "--format=%h%x00%ad", "--date=short"])
+    if not out:
+        return None, None
+    entries = [line for line in out.splitlines() if "\x00" in line]
+    if not entries:
+        return None, None
+    short, _, date = entries[-1].partition("\x00")
+    return short, date.strip()
+
+
+def _iter_matches(lines, basename, min_entropy):
+    """Yield (lineno, line, pattern, match, value) for every credential in `lines`.
+
+    The single place the pattern list and the false-positive filters are
+    applied. Both the working-tree scan and the git-history scan go through
+    here, because two copies of a filter chain is two copies that drift, and the
+    filters are most of what makes this engine worth running -- they are what
+    took 563 findings on real library code down to 1.
+    """
+    for lineno, line in enumerate(lines, start=1):
+        if len(line) > _MAX_LINE_LEN:
+            continue
+
+        for pattern in PATTERNS:
+            if (pattern.filename_re is not None
+                    and not pattern.filename_re.search(basename)):
+                continue
+            for match in pattern.regex.finditer(line):
+                value = match.group(pattern.secret_group) or match.group(0)
+
+                is_generic = pattern.id == "generic-assigned-secret"
+                if _looks_like_placeholder(value, generic=is_generic):
+                    continue
+                if (pattern.id == "private-key"
+                        and not _pem_has_body(lines, lineno, line, match.end())):
+                    continue
+                if (pattern.confidence == "medium"
+                        and _shannon_entropy(value) < min_entropy):
+                    continue
+
+                yield lineno, line, pattern, match, value
+
+
 def scan(target, min_entropy=2.0, max_file_bytes=MAX_FILE_BYTES):
     """Scan a file or directory for hardcoded credentials.
 
@@ -580,64 +739,227 @@ def scan(target, min_entropy=2.0, max_file_bytes=MAX_FILE_BYTES):
         exposure, downgrade, note = _exposure(path, tracked)
         basename = os.path.basename(path)
 
-        for lineno, line in enumerate(lines, start=1):
-            if len(line) > _MAX_LINE_LEN:
+        for lineno, line, pattern, match, value in _iter_matches(
+                lines, basename, min_entropy):
+            key = (path, lineno, value)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            message = f"{pattern.name} found in {os.path.basename(path)}."
+            if note:
+                message += " " + note
+            message += " " + pattern.remediation
+
+            findings.append({
+                "check_id": f"safeship.secrets.{pattern.id}",
+                "path": path,
+                "start": {"line": lineno, "col": match.start() + 1},
+                "end": {"line": lineno, "col": match.end() + 1},
+                "extra": {
+                    "message": message,
+                    "severity": _shift_severity(pattern.severity, downgrade),
+                    # The redacted line, never the raw one. A security report
+                    # that prints the key it found has leaked it again --
+                    # into logs, terminals, and pasted screenshots.
+                    "lines": line.replace(value, _redact(value)).strip()[:200],
+                    "metadata": {
+                        "engine": "secrets",
+                        "secret_type": pattern.name,
+                        "redacted": _redact(value),
+                        "confidence": pattern.confidence,
+                        "exposure": exposure,
+                        # Kept as separate fields as well as glued into
+                        # `message`, so a report can lay them out under
+                        # its own headings instead of printing the
+                        # remediation twice.
+                        "exposure_note": note,
+                        "remediation": pattern.remediation,
+                    },
+                },
+            })
+
+    findings.sort(key=lambda f: (f["path"], f["start"]["line"]))
+    return findings
+
+
+def scan_history(target, min_entropy=2.0):
+    """Find credentials that were committed and later removed.
+
+    WHY THIS IS A SEPARATE PASS
+        Deleting a key from a file and committing the removal looks like a fix
+        and is not one. The old blob stays in the object store, in every clone,
+        and in every fork, and `git show` brings it back in one command. The
+        working-tree scan cannot see it, because by then the file is clean --
+        which is exactly why people are confident the problem is gone.
+
+        Benchmarking against gitleaks is what put this here. Its primary mode is
+        history scanning and ours had none, so a credential removed from HEAD
+        but alive in the reflog was one we missed completely.
+
+    WHAT IT DELIBERATELY DOES NOT REPORT
+        Anything still present at HEAD. The working-tree scan already has it,
+        and listing it again under a second heading trains the reader to skim
+        the history section. Only blobs absent from the current commit qualify.
+
+    NO EXPOSURE DOWNGRADE
+        `scan()` lowers severity for untracked files, because a credential that
+        never reached git is a smaller problem. Nothing here qualifies: every
+        finding is by definition something that was committed.
+
+    Raises:
+        SecretScanError: git is missing, or its history could not be read.
+
+    A target that simply is not a git repository returns [] rather than
+    raising. There is no history to examine, so nothing went unchecked -- and
+    reporting "NOT SCANNED" for a directory that never had commits would cry
+    wolf on the one warning that has to stay meaningful.
+    """
+    root = target if os.path.isdir(target) else os.path.dirname(os.path.abspath(target))
+    root = root or "."
+
+    inside = _git(root, ["rev-parse", "--is-inside-work-tree"])
+    if inside is None or inside.strip() != "true":
+        return []
+
+    # Git reports blob paths relative to the repository root, which is not
+    # necessarily the directory being scanned. Two things follow, and both were
+    # wrong before they were handled:
+    #
+    #   - Paths must be made absolute against the repo root. Handing the report
+    #     a repo-relative path made it render "../../../../../../.env".
+    #   - Blobs outside the scan target must be dropped. Scanning one
+    #     subdirectory of a monorepo otherwise reports credentials from every
+    #     other project in it, which is not what the user asked about.
+    toplevel = _git(root, ["rev-parse", "--show-toplevel"])
+    if not toplevel:
+        return []
+    repo_root = toplevel.strip()
+    target_abs = norm_path(root)
+
+    blobs, current_blobs, truncated = _blobs_only_in_history(root)
+    if blobs is None:
+        raise SecretScanError(f"Could not read git history for {target}.")
+
+    # Excluding by blob is not enough. A file that was reformatted, or had one
+    # unrelated line changed, leaves an OLD blob containing the SAME credential
+    # that is still sitting in HEAD -- so a blob-only check reports secrets the
+    # working-tree scan already found, under a heading that says they were
+    # deleted. Measured on this repo: 13 findings, 12 of them still in HEAD.
+    # The unit that matters is the credential, not the object that held it.
+    current_values = set()
+    for sha, payload in _read_blobs(root, [s for s, _ in current_blobs]).items():
+        if b"\x00" in payload[:8000]:
+            continue
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        basename = os.path.basename(dict(current_blobs).get(sha, ""))
+        for _lineno, _line, _pattern, _match, value in _iter_matches(
+                text.splitlines(), basename, min_entropy):
+            current_values.add(value)
+
+    def absolute(blob_path):
+        return os.path.join(repo_root, blob_path.replace("/", os.sep))
+
+    def in_scope(blob_path):
+        candidate = norm_path(absolute(blob_path))
+        return candidate == target_abs or candidate.startswith(target_abs + os.sep)
+
+    blobs = [(sha, path) for sha, path in blobs if in_scope(path)]
+
+    contents = _read_blobs(root, [sha for sha, _ in blobs])
+    paths = dict(blobs)
+
+    findings = []
+    seen = set()
+
+    for sha, payload in contents.items():
+        # A NUL byte means binary; there is no line structure to scan.
+        if b"\x00" in payload[:8000]:
+            continue
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+
+        rel = paths.get(sha, "")
+        path = absolute(rel)
+        basename = os.path.basename(rel)
+        lines = text.splitlines()
+
+        for lineno, line, pattern, match, value in _iter_matches(
+                lines, basename, min_entropy):
+            # Still present at HEAD: the working-tree scan owns this one.
+            if value in current_values:
                 continue
 
-            for pattern in PATTERNS:
-                if (pattern.filename_re is not None
-                        and not pattern.filename_re.search(basename)):
-                    continue
-                for match in pattern.regex.finditer(line):
-                    value = match.group(pattern.secret_group) or match.group(0)
+            # One credential, however many old blobs happen to contain it.
+            key = (rel, value)
+            if key in seen:
+                continue
+            seen.add(key)
 
-                    is_generic = pattern.id == "generic-assigned-secret"
-                    if _looks_like_placeholder(value, generic=is_generic):
-                        continue
-                    if (pattern.id == "private-key"
-                            and not _pem_has_body(lines, lineno, line, match.end())):
-                        continue
-                    if (pattern.confidence == "medium"
-                            and _shannon_entropy(value) < min_entropy):
-                        continue
+            commit, date = _commit_for_blob(root, sha)
+            where = f"{commit} ({date})" if commit else "an earlier commit"
 
-                    key = (path, lineno, value)
-                    if key in seen:
-                        continue
-                    seen.add(key)
+            findings.append({
+                "check_id": f"safeship.secrets.history.{pattern.id}",
+                "path": path,
+                "start": {"line": lineno, "col": match.start() + 1},
+                "end": {"line": lineno, "col": match.end() + 1},
+                "extra": {
+                    "message": (
+                        f"{pattern.name} committed in {where} and since removed "
+                        f"from {basename or rel}. It is still in git history, so "
+                        "it is still in every clone and fork of this repository. "
+                        "Deleting the file did not revoke the credential. "
+                        + pattern.remediation
+                    ),
+                    "severity": pattern.severity,
+                    "lines": line.replace(value, _redact(value)).strip()[:200],
+                    "metadata": {
+                        "engine": "secrets",
+                        "secret_type": pattern.name,
+                        "redacted": _redact(value),
+                        "confidence": pattern.confidence,
+                        "exposure": "git history",
+                        "exposure_note": (
+                            "Removed from the working tree but recoverable with "
+                            "`git show`. Rotate the credential; rewriting history "
+                            "does not help anyone who already cloned."
+                        ),
+                        "history_commit": commit or sha[:7],
+                        "history_date": date or "",
+                        "remediation": pattern.remediation,
+                    },
+                },
+            })
 
-                    message = f"{pattern.name} found in {os.path.basename(path)}."
-                    if note:
-                        message += " " + note
-                    message += " " + pattern.remediation
-
-                    findings.append({
-                        "check_id": f"safeship.secrets.{pattern.id}",
-                        "path": path,
-                        "start": {"line": lineno, "col": match.start() + 1},
-                        "end": {"line": lineno, "col": match.end() + 1},
-                        "extra": {
-                            "message": message,
-                            "severity": _shift_severity(pattern.severity, downgrade),
-                            # The redacted line, never the raw one. A security report
-                            # that prints the key it found has leaked it again --
-                            # into logs, terminals, and pasted screenshots.
-                            "lines": line.replace(value, _redact(value)).strip()[:200],
-                            "metadata": {
-                                "engine": "secrets",
-                                "secret_type": pattern.name,
-                                "redacted": _redact(value),
-                                "confidence": pattern.confidence,
-                                "exposure": exposure,
-                                # Kept as separate fields as well as glued into
-                                # `message`, so a report can lay them out under
-                                # its own headings instead of printing the
-                                # remediation twice.
-                                "exposure_note": note,
-                                "remediation": pattern.remediation,
-                            },
-                        },
-                    })
+    if truncated:
+        findings.append({
+            "check_id": "safeship.secrets.history.truncated",
+            "path": root,
+            "start": {"line": 1, "col": 1},
+            "end": {"line": 1, "col": 1},
+            "extra": {
+                "message": (
+                    f"History scan stopped after {MAX_HISTORY_BLOBS} objects. "
+                    "Older history was not examined, so this section is "
+                    "incomplete -- not clean."
+                ),
+                "severity": "WARNING",
+                "lines": "",
+                "metadata": {
+                    "engine": "secrets",
+                    "secret_type": "Incomplete history scan",
+                    "confidence": "high",
+                    "exposure": "git history",
+                    "remediation": "Run gitleaks for a full history sweep.",
+                },
+            },
+        })
 
     findings.sort(key=lambda f: (f["path"], f["start"]["line"]))
     return findings

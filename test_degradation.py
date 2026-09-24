@@ -178,13 +178,21 @@ def check_total_failure_is_loud(failures):
     These two outcomes look identical in a report and mean opposite things.
     Confusing them is how a security tool tells you that you are safe.
     """
-    saved_secrets, saved_config = secrets_engine.scan, config_engine.scan
+    # Every *planned* engine has to fail, which means every one of them has to
+    # be broken here. When git-history scanning was added as a fourth entry this
+    # check went red, because one surviving engine is by definition not total
+    # failure -- add the new engine here whenever the planned table grows.
+    saved_secrets = secrets_engine.scan
+    saved_history = secrets_engine.scan_history
+    saved_config = config_engine.scan
     secrets_engine.scan = explode
+    secrets_engine.scan_history = explode
     config_engine.scan = explode
     try:
         exit_exc, out, err = run_analyze([TARGET] + OFFLINE)
     finally:
         secrets_engine.scan = saved_secrets
+        secrets_engine.scan_history = saved_history
         config_engine.scan = saved_config
 
     if exit_exc is None:

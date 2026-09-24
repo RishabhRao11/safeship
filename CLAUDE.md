@@ -72,7 +72,7 @@ what:
 | File | What it does | State |
 |---|---|---|
 | `scanner.py` | Runs Semgrep, returns parsed findings | Works |
-| `engines/secrets.py` | Credentials in **any** text file | Works, 16/16 on fixtures, 1 FP on 13,107 real files |
+| `engines/secrets.py` | Credentials in **any** text file, plus git history | Works, 16/16 on fixtures, 1 FP on 13,107 real files |
 | `engines/dependencies.py` | OSV.dev CVE lookup, pip + npm | Works, 9/9 on fixtures |
 | `engines/config.py` | Insecure config, 22 rules + 2 absence checks | Works, 22/22 on fixtures |
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
@@ -237,6 +237,46 @@ similar marker; each gets its own fact set. Without this, one service's
 `import helmet` in a monorepo marks the fact true and silently clears the service
 next door that has none.
 
+**Git history is scanned, because deleting a key is not revoking it.**
+`scan_history()` in `engines/secrets.py`. Removing a credential from a file and
+committing the removal *looks* like a fix: the file is clean, the working-tree
+scan says nothing, and the person is now confident. The old blob is still in the
+object store, still in every clone and fork, and `git show` brings it back in one
+command.
+
+Added after benchmarking against gitleaks, whose primary mode is history
+scanning and ours was nothing. On by default, `--no-history` to skip; 0.74s
+across this repo's 22 commits, so it does not need to be opt-in.
+
+Four things were wrong on the way, and all four are the kind that look fine:
+
+- **Excluding by blob is not enough — exclude by credential value.** A file that
+  was reformatted, or had one unrelated line changed, leaves an old blob holding
+  a secret that is *still in HEAD*. Measured on this repo: **13 findings, 12 of
+  them still live**, reported under a heading that says they were deleted. The
+  unit that matters is the credential, not the object that carried it. After
+  the fix: 2, and both genuine — the rename left `postgresql://vibesec:...`
+  connection strings in history while HEAD says `safeship:`.
+- **`git log --find-object` lists newest first**, so taking the first entry names
+  the commit that *removed* the credential. Sending someone to the deletion
+  commit is worse than saying nothing: it makes the tool look wrong about the
+  thing it is warning them about. Take the oldest.
+- **Blob paths are relative to the repo root, not to the scan target.** Handed
+  straight to the report they rendered as `../../../../../../.env`, and scanning
+  one subdirectory of a monorepo reported credentials from every other project
+  in it. Make them absolute, then filter to the target.
+- **A directory that is not a git repository returns `[]`, it does not raise.**
+  There is no history, so nothing went unchecked. A `NOT SCANNED` warning for a
+  folder that never had commits cries wolf on the one warning that has to stay
+  meaningful.
+
+Contract in `test_fixtures.py`, building throwaway repos at runtime because a
+nested `.git` would not survive being cloned. **Mutation testing earned its keep
+here**: the first version of the "still present at HEAD" fixture had a single
+commit, so there was no historical blob at all and the check passed whether or
+not the suppression worked. Dropping the exclusion did not turn it red. The
+fixture now changes the file while keeping the key, which is the real case.
+
 **At a shared line, the engine that answered wins — tier before severity.**
 Two rules on one line are usually describing the same thing, and dedupe has to
 pick which description to keep. Severity alone could not decide it: a registry
@@ -326,8 +366,8 @@ python engines/dependencies.py myproject/ --json
 python engines/config.py myproject/ --json
 ```
 
-Flags: `--no-semgrep` `--no-secrets` `--no-config` `--no-deps` `--secrets-only`
-`--no-explain` `--no-dedupe` `--json` `--html PATH`
+Flags: `--no-semgrep` `--no-secrets` `--no-config` `--no-deps` `--no-history`
+`--secrets-only` `--no-explain` `--no-dedupe` `--json` `--html PATH`
 
 `report.py` also runs standalone against `--json` output, so the report can be
 iterated on without re-scanning:
@@ -362,6 +402,7 @@ Three, all standalone, all exit 0/1:
 ```bash
 python test_fixtures.py          # every count in this file, plus dedupe precedence
 python test_degradation.py       # failure paths: 5 contracts, all mutation-verified
+                                 # (breaking every engine means every one, history included)
 python test_report_escaping.py   # the HTML report cannot be made to execute code
 ```
 

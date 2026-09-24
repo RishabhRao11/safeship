@@ -25,7 +25,7 @@ Four engines run over the same target and land in one report.
 
 | Engine | Finds |
 |---|---|
-| **Credentials** | API keys, tokens, private keys, and database URLs — in **any** text file, including `.env`, `config.json`, `docker-compose.yml`, and README files that a code scanner never opens |
+| **Credentials** | API keys, tokens, private keys, and database URLs — in **any** text file, including `.env`, `config.json`, `docker-compose.yml`, and README files that a code scanner never opens. Also **git history**, for keys you deleted but never revoked |
 | **Dependencies** | Known CVEs in `requirements.txt` and `package.json`, with CVSS scores and the version that fixes them, via [OSV.dev](https://osv.dev) |
 | **Configuration** | Debug mode on in production, CORS opened to the internet, TLS verification disabled, `.env` committed to git, secrets published to the browser via `NEXT_PUBLIC_` |
 | **Static analysis** | SQL injection, command injection, `eval` on user input, and unauthenticated debug routes — Semgrep plus custom rules for the mistakes AI-generated code actually makes |
@@ -75,12 +75,16 @@ findings. SafeShip reads the file and asks OSV.
 
 **Where they beat SafeShip:** `pip-audit` and `npm audit` both check
 **transitive** dependencies — SafeShip only reads what you declared. `gitleaks`
-scans **git history**, so it finds credentials that were committed and later
-deleted; SafeShip only reads the working tree. It is also about seven times
-faster, being Go rather than Python. And `detect-secrets` reports 0 false
-positives on those 13,107 library files to SafeShip's 1 — that gap used to be
-0 to 20, and closing it is what [CLAUDE.md](CLAUDE.md) spends its longest
-section on.
+is about seven times faster, being Go rather than Python, and walks every commit
+where SafeShip compares against your current one — so it will still catch a key
+added and removed inside a branch that was later squashed. And `detect-secrets`
+reports 0 false positives on those 13,107 library files to SafeShip's 1 — that
+gap used to be 0 to 20, and closing it is what [CLAUDE.md](CLAUDE.md) spends its
+longest section on.
+
+Git history scanning exists *because* of this benchmark: gitleaks had it, we did
+not, and a credential you deleted from a file is still in every clone of your
+repository.
 
 ## Design decisions worth knowing
 
@@ -118,6 +122,7 @@ npx safeship doctor                   # check the toolchain is installed
 | `--json` | JSON on stdout |
 | `--secrets-only` | fastest path: offline, no API key |
 | `--no-deps` | skip the dependency check, the only engine that uses the network |
+| `--no-history` | skip the git-history sweep for deleted-but-committed keys |
 | `--no-explain` | skip the AI explanations |
 
 ## Requirements

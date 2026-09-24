@@ -29,7 +29,9 @@ Exit code is 0 on pass, 1 on failure, so it drops into CI unchanged.
 """
 
 import os
+import subprocess
 import sys
+import tempfile
 
 import analyze
 import scanner
@@ -175,6 +177,98 @@ def check_rules(failures, skips):
         )
 
 
+def _git_repo(directory, steps):
+    """Build a throwaway repo. `steps` is a list of ({path: text}, message)."""
+    run = lambda *a: subprocess.run(["git", "-C", directory] + list(a),
+                                    capture_output=True, check=True)
+    run("init", "-q", ".")
+    run("config", "user.email", "test@example.invalid")
+    run("config", "user.name", "Fixture")
+    shas = []
+    for files, message in steps:
+        for name, text in files.items():
+            with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+                handle.write(text)
+        run("add", "-A")
+        run("commit", "-q", "-m", message)
+        shas.append(subprocess.run(["git", "-C", directory, "rev-parse", "--short", "HEAD"],
+                                   capture_output=True, text=True).stdout.strip())
+    return shas
+
+
+def check_history_scan(failures, skips):
+    """Credentials that were committed and later deleted are still leaked.
+
+    Removing a key from a file and committing the removal looks like a fix. The
+    old blob stays in the object store and in every clone, and the working-tree
+    scan cannot see it -- which is exactly why people are sure it is gone.
+
+    Built at runtime rather than committed as a fixture: a nested .git inside
+    this repository would not survive being cloned.
+    """
+    key = "AKIA3XQ7NVBW2LFDR5TC"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        deleted = os.path.join(tmp, "deleted")
+        still = os.path.join(tmp, "still")
+        plain = os.path.join(tmp, "plain")
+        for d in (deleted, still, plain):
+            os.makedirs(d)
+
+        added, _removed = _git_repo(deleted, [
+            ({".env": f"AWS_ACCESS_KEY_ID={key}\nPORT=3000\n"}, "add the key"),
+            ({".env": "PORT=3000\n"}, "remove it, which looks like a fix"),
+        ])
+        # The key stays, but the FILE changes -- so an old blob exists that
+        # still contains it. A single-commit repo would not test this at all:
+        # with no historical-only blob there is nothing to suppress, and the
+        # check passes whether or not the suppression works. Mutation testing
+        # is what exposed that; the first version of this fixture was useless.
+        _git_repo(still, [
+            ({".env": f"AWS_ACCESS_KEY_ID={key}\nPORT=3000\n"}, "key and a port"),
+            ({".env": f"AWS_ACCESS_KEY_ID={key}\nPORT=4000\n"}, "change the port only"),
+        ])
+
+        # 1. The deleted credential must be found, and the working-tree scan
+        #    must NOT find it -- that contrast is the whole justification.
+        if secrets_engine.scan(deleted):
+            failures.append("history: the working-tree scan sees a deleted key; "
+                            "the fixture is not testing what it claims to")
+        found = secrets_engine.scan_history(deleted)
+        if len(found) != 1:
+            failures.append(
+                f"history: expected 1 finding for a committed-then-deleted key, "
+                f"got {len(found)}"
+            )
+            return
+
+        # 2. Naming the commit that REMOVED it sends someone to the wrong place.
+        named = found[0]["extra"]["metadata"].get("history_commit")
+        if named != added:
+            failures.append(
+                f"history: named commit {named}, but {added} is the one that "
+                "added the key -- git log --find-object lists newest first"
+            )
+
+        # 3. A credential still in the working tree belongs to the other scan.
+        #    Reporting it twice under a 'deleted' heading trains people to skim.
+        if secrets_engine.scan_history(still):
+            failures.append(
+                "history: re-reported a credential that is still at HEAD, which "
+                "the working-tree scan already covers"
+            )
+
+        # 4. No history is not the same as a check that failed.
+        try:
+            if secrets_engine.scan_history(plain) != []:
+                failures.append("history: a directory with no git repo produced findings")
+        except secrets_engine.SecretScanError as exc:
+            failures.append(
+                f"history: a non-git directory raised instead of returning [] ({exc}); "
+                "that cries wolf on the NOT SCANNED warning"
+            )
+
+
 def check_dedupe_precedence(failures, skips):
     """A shared line is reported by whichever engine actually answered it.
 
@@ -243,6 +337,7 @@ def check_dedupe_precedence(failures, skips):
 CHECKS = (
     ("secrets: 16 found, safe files silent", check_secrets),
     ("dedupe keeps the engine that answered", check_dedupe_precedence),
+    ("history: deleted credentials are still leaked", check_history_scan),
     ("config: 22 bad, 0 good", check_config),
     ("dependencies: 9 vulnerable packages", check_dependencies),
     ("semgrep rules: 7 Python, 11 JS, 0 on both safe fixtures", check_rules),

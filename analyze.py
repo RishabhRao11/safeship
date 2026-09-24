@@ -495,6 +495,13 @@ def deduplicate(findings):
         if metadata.get("package"):
             location = location + (metadata["package"],)
 
+        # A history finding and a working-tree finding can land on the same
+        # path and line and be about different points in time. Collapsing them
+        # would hide the deleted-but-still-committed one behind the live one --
+        # and that is the finding nobody knew they had.
+        if metadata.get("history_commit"):
+            location = location + (metadata["history_commit"],)
+
         severity = finding.get("extra", {}).get("severity", "INFO")
 
         if location not in by_location:
@@ -767,6 +774,12 @@ def main():
              "that needs network access.",
     )
     parser.add_argument(
+        "--no-history",
+        action="store_true",
+        help="Skip the git-history sweep for credentials that were committed "
+             "and later deleted.",
+    )
+    parser.add_argument(
         "--secrets-only",
         action="store_true",
         help="Run only the credential engine. Fast, offline, and needs no API key.",
@@ -802,6 +815,7 @@ def main():
     # only way to skip Semgrep -- and it disabled config and dependencies too.
     run_semgrep = not (args.no_semgrep or args.secrets_only)
     run_secrets = not args.no_secrets
+    run_history = run_secrets and not args.no_history
     run_config = not (args.no_config or args.secrets_only)
     run_deps = not (args.no_deps or args.secrets_only)
 
@@ -830,6 +844,12 @@ def main():
         planned.append((
             "secrets", "credential scan",
             lambda: secrets_engine.scan(args.target),
+            secrets_engine.SecretScanError,
+        ))
+    if run_history:
+        planned.append((
+            "secrets", "git history scan",
+            lambda: secrets_engine.scan_history(args.target),
             secrets_engine.SecretScanError,
         ))
     if run_config:
