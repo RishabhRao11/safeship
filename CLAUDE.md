@@ -73,7 +73,7 @@ what:
 |---|---|---|
 | `scanner.py` | Runs Semgrep, returns parsed findings | Works |
 | `engines/secrets.py` | Credentials in **any** text file, plus git history | Works, 16/16 on fixtures, 1 FP on 13,107 real files |
-| `engines/dependencies.py` | OSV.dev CVE lookup, pip + npm | Works, 9/9 on fixtures |
+| `engines/dependencies.py` | OSV.dev CVE lookup, pip + npm, transitive via lockfiles | Works, 9/9 on fixtures; matches `npm audit` 10/10 on a real tree |
 | `engines/config.py` | Insecure config, 22 rules + 2 absence checks | Works, 22/22 on fixtures |
 | `analyze.py` | Orchestrates, dedupes, reports | Works |
 | `report.py` | Findings → one self-contained HTML file | Works |
@@ -236,6 +236,43 @@ project when it holds a `package.json`, `requirements.txt`, `manage.py`, or
 similar marker; each gets its own fact set. Without this, one service's
 `import helmet` in a monorepo marks the fact true and silently clears the service
 next door that has none.
+
+**Transitive dependencies are scanned, from the lockfile.** The manifest
+records what you asked for; the lockfile records what is actually installed,
+which is usually ten times more packages. A CVE in something you never chose is
+just as exploitable as one you did.
+
+Added because the benchmark showed this was the one axis where `npm audit` and
+`pip-audit` were simply better. Verified by generating a lockfile for a
+four-dependency Express app and running both:
+
+| | packages reported |
+|---|---|
+| `npm audit` | axios, body-parser, cookie, express, jsonwebtoken, lodash, path-to-regexp, qs, send, serve-static |
+| SafeShip | the same ten — 4 direct, 6 transitive |
+
+Before the change it found 4. Sources: `package-lock.json` (v1 nested and v2/v3
+flat) and `Pipfile.lock`. A `requirements.txt` produced by `pip freeze` is
+already flat, so pip users were mostly covered by accident.
+
+**The fix advice differs, and that is the point of tracking `direct`.** Telling
+someone to "upgrade lodash to 4.17.21" when lodash is not in their package.json
+is advice they cannot follow: it sends them to edit a file that does not mention
+the package, and when that fails the natural conclusion is that the tool is
+wrong. Transitive findings say so explicitly and suggest `npm audit fix` or an
+`overrides` entry, with the warning that an override forces a version the parent
+did not choose.
+
+*Severity is not downgraded for being transitive.* Actionability and
+exploitability are different things, and quietly rating a real CVE lower because
+it is inconvenient to fix would be inventing a judgment the data does not
+support.
+
+**Known gaps, all for the same reason:** `poetry.lock` and `uv.lock` are TOML,
+and `tomllib` arrived in 3.11 while `MIN_PYTHON` is 3.10 — parsing them means
+either a dependency or a hand-rolled parser, and this file already has a section
+on why hand-rolled parsers are a bad idea. `yarn.lock` is a bespoke format and
+`pnpm-lock.yaml` is YAML, which has no stdlib parser either.
 
 **Git history is scanned, because deleting a key is not revoking it.**
 `scan_history()` in `engines/secrets.py`. Removing a credential from a file and
@@ -579,9 +616,12 @@ pinned `urllib3==1.24.1` → `ResolutionImpossible`. It is not broken — it rep
 requirements.txt written by an AI from memory is often unresolvable, and that is
 precisely this tool's input.** Reading the file and querying OSV needs no resolve.
 
-Fair to both: `pip-audit` and `npm audit` cover **transitive** dependencies and
-SafeShip does not. That is a real gap in their favour. `npm audit` also needs a
-lockfile, which had to be generated first.
+Fair to both: `pip-audit` and `npm audit` cover **transitive** dependencies.
+That was a real gap in their favour and is now closed -- on a generated lockfile
+for a four-dependency Express app, SafeShip and `npm audit` report the same ten
+packages. `npm audit` still needs a lockfile it can resolve; SafeShip reads
+whichever of `package-lock.json` or `Pipfile.lock` is present and falls back to
+the manifest when neither is.
 
 **Secrets**, on `test_targets/secrets/` — 16 planted credentials:
 

@@ -177,6 +177,83 @@ def check_rules(failures, skips):
         )
 
 
+def check_transitive_dependencies(failures, skips):
+    """The resolved tree is scanned, not just what package.json asked for.
+
+    Benchmarking showed this was the one axis where npm audit and pip-audit were
+    simply better: a CVE in a package you never chose is just as exploitable as
+    one you did. On a generated lockfile for a four-dependency Express app,
+    SafeShip and npm audit now report the same ten packages.
+
+    Parsing only, deliberately -- no OSV call. This checks the code written
+    here, and it stays deterministic and offline. Whether lodash 4.17.15 has an
+    advisory is OSV's business and changes over time.
+    """
+    import json as _json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "package.json"), "w", encoding="utf-8") as fh:
+            _json.dump({"dependencies": {"express": "4.17.1"}}, fh)
+        with open(os.path.join(tmp, "package-lock.json"), "w", encoding="utf-8") as fh:
+            _json.dump({
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "demo"},
+                    "node_modules/express": {"version": "4.17.1"},
+                    "node_modules/qs": {"version": "6.7.0"},
+                },
+            }, fh)
+
+        deps = {d.name: d for d in
+                dependencies_engine.parse_package_json(os.path.join(tmp, "package.json"))}
+
+        if "qs" not in deps:
+            failures.append(
+                "transitive: a package present only in package-lock.json was not "
+                "scanned -- this is the gap npm audit was filling"
+            )
+        elif deps["qs"].direct:
+            failures.append(
+                "transitive: qs is not in package.json but was marked direct, so "
+                "the fix advice will tell the user to edit a file that does not "
+                "mention it"
+            )
+        if "express" not in deps or not deps["express"].direct:
+            failures.append("transitive: a declared dependency lost its `direct` mark")
+
+    # lockfileVersion 1 nests the tree. Reading only the top level found the
+    # direct dependencies and silently ignored everything underneath.
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "package.json"), "w", encoding="utf-8") as fh:
+            _json.dump({"dependencies": {"express": "4.17.1"}}, fh)
+        with open(os.path.join(tmp, "package-lock.json"), "w", encoding="utf-8") as fh:
+            _json.dump({
+                "lockfileVersion": 1,
+                "dependencies": {
+                    "express": {"version": "4.17.1",
+                                "dependencies": {"qs": {"version": "6.7.0"}}},
+                },
+            }, fh)
+        names = {d.name for d in
+                 dependencies_engine.parse_package_json(os.path.join(tmp, "package.json"))}
+        if "qs" not in names:
+            failures.append(
+                "transitive: a nested lockfileVersion 1 dependency was missed; "
+                "for a v1 lockfile that is most of what is installed"
+            )
+
+    # Pipfile.lock is a fully resolved tree, dev section included -- a
+    # vulnerable dev tool still runs on your machine and in CI.
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "Pipfile.lock"), "w", encoding="utf-8") as fh:
+            _json.dump({"default": {"flask": {"version": "==0.12.2"}},
+                        "develop": {"pyyaml": {"version": "==5.1"}}}, fh)
+        found = {d.name: d.version for d in
+                 dependencies_engine.parse_pipfile_lock(os.path.join(tmp, "Pipfile.lock"))}
+        if found != {"flask": "0.12.2", "pyyaml": "5.1"}:
+            failures.append(f"transitive: Pipfile.lock parsed as {found}")
+
+
 def _git_repo(directory, steps):
     """Build a throwaway repo. `steps` is a list of ({path: text}, message)."""
     run = lambda *a: subprocess.run(["git", "-C", directory] + list(a),
@@ -340,6 +417,7 @@ CHECKS = (
     ("history: deleted credentials are still leaked", check_history_scan),
     ("config: 22 bad, 0 good", check_config),
     ("dependencies: 9 vulnerable packages", check_dependencies),
+    ("transitive: the resolved tree, not just the manifest", check_transitive_dependencies),
     ("semgrep rules: 7 Python, 11 JS, 0 on both safe fixtures", check_rules),
 )
 

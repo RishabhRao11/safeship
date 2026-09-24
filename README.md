@@ -26,7 +26,7 @@ Four engines run over the same target and land in one report.
 | Engine | Finds |
 |---|---|
 | **Credentials** | API keys, tokens, private keys, and database URLs — in **any** text file, including `.env`, `config.json`, `docker-compose.yml`, and README files that a code scanner never opens. Also **git history**, for keys you deleted but never revoked |
-| **Dependencies** | Known CVEs in `requirements.txt` and `package.json`, with CVSS scores and the version that fixes them, via [OSV.dev](https://osv.dev) |
+| **Dependencies** | Known CVEs with CVSS scores and the version that fixes them, via [OSV.dev](https://osv.dev). Reads `package-lock.json` and `Pipfile.lock` when present, so **transitive** dependencies are covered too |
 | **Configuration** | Debug mode on in production, CORS opened to the internet, TLS verification disabled, `.env` committed to git, secrets published to the browser via `NEXT_PUBLIC_` |
 | **Static analysis** | SQL injection, command injection, `eval` on user input, and unauthenticated debug routes — Semgrep plus custom rules for the mistakes AI-generated code actually makes |
 
@@ -73,8 +73,7 @@ was written against, the false-positive counts are `gitleaks` 220,
 two pinned versions contradicted each other — and you get an error instead of
 findings. SafeShip reads the file and asks OSV.
 
-**Where they beat SafeShip:** `pip-audit` and `npm audit` both check
-**transitive** dependencies — SafeShip only reads what you declared. `gitleaks`
+**Where they beat SafeShip:** `gitleaks`
 is about seven times faster, being Go rather than Python, and walks every commit
 where SafeShip compares against your current one — so it will still catch a key
 added and removed inside a branch that was later squashed. And `detect-secrets`
@@ -82,9 +81,11 @@ reports 0 false positives on those 13,107 library files to SafeShip's 1 — that
 gap used to be 0 to 20, and closing it is what [CLAUDE.md](CLAUDE.md) spends its
 longest section on.
 
-Git history scanning exists *because* of this benchmark: gitleaks had it, we did
-not, and a credential you deleted from a file is still in every clone of your
-repository.
+Two features exist *because* of this benchmark. Git history scanning, since
+gitleaks had it and a credential you deleted from a file is still in every clone
+of your repository. And transitive dependency scanning, since `npm audit` had
+it — on a generated lockfile for a four-dependency Express app, SafeShip and
+`npm audit` now report the same ten packages.
 
 ## Design decisions worth knowing
 

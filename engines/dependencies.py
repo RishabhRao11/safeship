@@ -49,6 +49,10 @@ class Dependency:
     line: int             # line within that manifest
     pinned: bool          # False when the version was inferred from a range
     source: str           # which file the version actually came from
+    # False when nothing in the project asked for this package -- it arrived as
+    # a dependency of a dependency. Same exploitability, different fix: you
+    # usually cannot bump it directly, the parent has to.
+    direct: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +164,31 @@ def parse_package_json(path):
             pinned=pinned,
             source=source,
         ))
+
+    # Everything else in the lockfile arrived as a dependency of a dependency.
+    #
+    # WHY THIS IS WORTH THE NOISE
+    #   `npm audit` and `pip-audit` both do it, and benchmarking against them is
+    #   what showed this was the one axis where they were simply better. A CVE
+    #   in a package you never chose is just as exploitable as one you did --
+    #   the difference is that you cannot fix it by editing package.json, which
+    #   is a reason to say so clearly, not a reason to stay quiet.
+    #
+    #   The line number points at package.json because that is the file the user
+    #   has open. The lockfile entry is named in the message instead.
+    for name, version in sorted(locked.items()):
+        if name in declared:
+            continue
+        deps.append(Dependency(
+            name=name,
+            version=version,
+            ecosystem="npm",
+            path=path,
+            line=1,
+            pinned=True,          # a lockfile version is the installed one
+            source="package-lock.json",
+            direct=False,
+        ))
     return deps
 
 
@@ -174,18 +203,56 @@ def _load_lockfile(lock_path):
         return {}
 
     versions = {}
-    # lockfileVersion 2/3: a flat "packages" map keyed by install path.
+    # lockfileVersion 2/3: a flat "packages" map keyed by install path. This is
+    # the whole resolved tree, direct and transitive alike -- which is exactly
+    # what makes transitive scanning possible without running npm.
     for install_path, meta in (data.get("packages") or {}).items():
         if not install_path or not isinstance(meta, dict):
             continue
+        if meta.get("link"):
+            continue  # a workspace symlink; the real entry appears separately
         name = meta.get("name") or install_path.split("node_modules/")[-1]
         if meta.get("version"):
             versions[name] = meta["version"]
-    # lockfileVersion 1: a nested "dependencies" tree.
-    for name, meta in (data.get("dependencies") or {}).items():
-        if isinstance(meta, dict) and meta.get("version"):
-            versions.setdefault(name, meta["version"])
+
+    # lockfileVersion 1: a nested "dependencies" tree. Reading only the top
+    # level here found the direct dependencies and silently ignored everything
+    # underneath -- which for a v1 lockfile is most of what is installed.
+    def walk(tree):
+        for name, meta in (tree or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            if meta.get("version"):
+                versions.setdefault(name, meta["version"])
+            walk(meta.get("dependencies"))
+
+    walk(data.get("dependencies"))
     return versions
+
+
+def _remediation(dep, upgrade_to):
+    """What to actually do about it, which is not the same for both kinds.
+
+    Telling someone to "upgrade lodash to 4.17.21" when lodash is not in their
+    package.json is advice they cannot follow. It sends them to edit a file that
+    does not mention the package, and when that fails the next conclusion is
+    that the tool is wrong.
+    """
+    if not upgrade_to:
+        return (f"No patched release of {dep.name} exists yet. Pin to a "
+                "different package or accept the risk deliberately.")
+    if dep.direct:
+        return f"Upgrade {dep.name} to {upgrade_to} or later."
+    if dep.ecosystem == "npm":
+        return (
+            f"{dep.name} is not in your package.json -- another package depends "
+            f"on it. Try `npm audit fix`, which updates the parent when it can. "
+            f"If that is not enough, add an override to package.json: "
+            f'"overrides": {{"{dep.name}": "{upgrade_to}"}} -- but test after, '
+            "because you are forcing a version the parent did not choose."
+        )
+    return (f"{dep.name} is an indirect dependency. Update whichever package "
+            f"requires it, or pin {dep.name}>={upgrade_to} explicitly.")
 
 
 def _find_line(lines, name):
@@ -197,9 +264,50 @@ def _find_line(lines, name):
     return 1
 
 
+def parse_pipfile_lock(path):
+    """Parse a Pipfile.lock, which is a fully resolved tree in JSON.
+
+    Pipenv records every package it installed, transitive ones included, with an
+    exact `==` version -- so unlike requirements.txt there is no guessing and no
+    resolution step. The `develop` section is included: a vulnerable dev tool
+    still runs on your machine and in CI.
+
+    Nothing marks which packages were asked for directly, so `direct` is left
+    True. Claiming otherwise would mean guessing, and a wrong "you did not
+    install this" is worse than not saying it.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+            data = json.loads(text)
+            lines = text.splitlines()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DependencyScanError(f"Could not parse {path}: {exc}")
+
+    deps = []
+    for section in ("default", "develop"):
+        for name, meta in (data.get(section) or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            version = (meta.get("version") or "").lstrip("=")
+            if not version:
+                continue  # a VCS or path requirement; no registry version
+            deps.append(Dependency(
+                name=name,
+                version=version,
+                ecosystem="PyPI",
+                path=path,
+                line=_find_line(lines, name),
+                pinned=True,
+                source="Pipfile.lock",
+            ))
+    return deps
+
+
 MANIFEST_PARSERS = {
     "requirements.txt": parse_requirements,
     "package.json": parse_package_json,
+    "Pipfile.lock": parse_pipfile_lock,
 }
 
 
@@ -522,6 +630,12 @@ def scan(target, timeout=DEFAULT_TIMEOUT):
                 f" Note: the version was read from {dep.source} as a range, not an "
                 "exact pin, so the installed version may differ."
             )
+        if not dep.direct:
+            message += (
+                f" You did not install {dep.name} -- it came in as a dependency of "
+                "something you did, so it is not in your package.json and editing "
+                "that file will not change it."
+            )
 
         findings.append({
             "check_id": f"safeship.dependencies.{dep.ecosystem.lower()}-known-vulnerability",
@@ -539,6 +653,8 @@ def scan(target, timeout=DEFAULT_TIMEOUT):
                     "ecosystem": dep.ecosystem,
                     "pinned": dep.pinned,
                     "version_source": dep.source,
+                    "direct": dep.direct,
+                    "dependency_kind": "direct" if dep.direct else "transitive",
                     "vulnerability_count": len(vulns),
                     "osv_ids": ids,
                     "cve_ids": cves,
@@ -547,12 +663,7 @@ def scan(target, timeout=DEFAULT_TIMEOUT):
                     "cvss_vector": top_vector,
                     "fixed_version": upgrade_to,
                     "summary": headline,
-                    "remediation": (
-                        f"Upgrade {dep.name} to {upgrade_to} or later."
-                        if upgrade_to else
-                        f"No patched release of {dep.name} exists yet. Pin to a "
-                        "different package or accept the risk deliberately."
-                    ),
+                    "remediation": _remediation(dep, upgrade_to),
                 },
             },
         })
