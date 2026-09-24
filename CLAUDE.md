@@ -83,7 +83,8 @@ what:
 | `rules/taint_flows.yaml` | 6 dataflow rules, Python + JS/TS | Works, 0 FPs on both safe fixtures |
 | `explainer.py` | Claude explains a Semgrep finding | **Works** — first real run 2026-09-05 |
 
-Measured on `test_targets/`: 87 raw findings → 72 locations.
+Measured on `test_targets/` (2026-09-24, all four engines): **151 raw
+findings → 88 locations**.
 
 Custom rules vs the registry alone, per language:
 
@@ -236,6 +237,49 @@ similar marker; each gets its own fact set. Without this, one service's
 `import helmet` in a monorepo marks the fact true and silently clears the service
 next door that has none.
 
+**At a shared line, the engine that answered wins — tier before severity.**
+Two rules on one line are usually describing the same thing, and dedupe has to
+pick which description to keep. Severity alone could not decide it: a registry
+rule and the secrets engine both call a leaked AWS key `ERROR`, so the tie fell
+to insertion order, and Semgrep is collected first.
+
+On `test_targets/secrets/.env` that cost four of the seven credentials. What was
+lost is not a label:
+
+| | kept before | kept after |
+|---|---|---|
+| rule | `detected-aws-access-key-id-value` | `secrets.aws-access-key-id` |
+| severity | high | **critical** |
+| snippet | `"requires login"` | `AWS_ACCESS_KEY_ID=AKIA...R5TC (20 chars)` |
+| remediation | generic | "Deactivate the key in IAM, then create a new one" |
+| git exposure | absent | "committed" |
+
+That snippet is not a typo. Semgrep's registry gates rule *content* behind a
+login, so an unauthenticated run gets the literal string `requires login` where
+the code should be. The winner was strictly less useful than the loser, and
+rated it lower too.
+
+`_survivor_rank()` now sorts on `(tier, severity)`, using the same three tiers
+the pipeline already routes on: engine-answered, dataflow, pattern. Measured on
+`test_targets/`, 18 locations changed owner and **every one** moved from a
+generic registry rule to a purpose-built finding — 10 credentials to the secrets
+engine, 6 injections to the taint rules, 2 to the config engine. Locations went
+78 → 79, because two adjacent secrets on `js/vulnerable.js:13-14` stopped being
+merged as one rule and are now correctly two.
+
+*Ranking by tier first also fixes a comparison that was never meaningful.*
+Severity scales differ per engine by design (see below), so comparing a config
+`WARNING` against a registry `ERROR` was comparing different units. Tier-first
+means severity is only ever compared within a tier.
+
+A second bug surfaced while fixing this: the survivor listed **itself** in
+`_also_matched`, because the challenger was appended before deciding who won.
+The report said "+2 other rules here" when one other rule had matched. Rare while
+promotions only happened on a severity difference; routine once tier decides.
+
+Both are contracts in `test_fixtures.py`, both mutation-verified — including
+**both insertion orders**, since order dependence was the actual bug.
+
 **Severity means different things per engine, deliberately.** The secrets engine
 downgrades on git exposure — a credential's risk really is a function of whether it
 reached your history. The config engine does *not*, because that would conflate
@@ -316,7 +360,7 @@ push on pattern shape alone — allowlist the paths rather than weakening them.
 Three, all standalone, all exit 0/1:
 
 ```bash
-python test_fixtures.py          # every count in this file, as an assertion
+python test_fixtures.py          # every count in this file, plus dedupe precedence
 python test_degradation.py       # failure paths: 5 contracts, all mutation-verified
 python test_report_escaping.py   # the HTML report cannot be made to execute code
 ```

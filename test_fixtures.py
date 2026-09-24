@@ -31,6 +31,7 @@ Exit code is 0 on pass, 1 on failure, so it drops into CI unchanged.
 import os
 import sys
 
+import analyze
 import scanner
 from engines import config as config_engine
 from engines import dependencies as dependencies_engine
@@ -174,8 +175,74 @@ def check_rules(failures, skips):
         )
 
 
+def check_dedupe_precedence(failures, skips):
+    """A shared line is reported by whichever engine actually answered it.
+
+    Severity alone could not decide this. A registry rule and the secrets engine
+    both call a leaked AWS key ERROR, so the tie fell to insertion order, and
+    Semgrep is collected first -- four of the seven credentials in
+    test_targets/secrets/.env were reported by the registry, at `high` instead
+    of `critical`, with the redaction, the git-exposure note and the
+    provider-specific remediation all replaced by a generic message and the
+    literal string "requires login" where the code should be.
+
+    Unit-level rather than pipeline-level on purpose: no Semgrep, no network,
+    and it states the contract directly instead of inferring it from counts.
+    """
+    def finding(check_id, severity, engine=None, taint=False):
+        metadata = {}
+        if engine:
+            metadata["engine"] = engine
+        if taint:
+            metadata["analysis"] = "taint"
+        return {"check_id": check_id, "path": "x.env", "start": {"line": 1},
+                "extra": {"severity": severity, "metadata": metadata}}
+
+    registry = finding("detected-aws-access-key-id-value", "ERROR")
+    answered = finding("safeship.secrets.aws-access-key-id", "ERROR", engine="secrets")
+
+    # The real bug was order dependence, so both orders are checked.
+    for label, order in (("registry first", [registry, answered]),
+                         ("engine first", [answered, registry])):
+        survivor = analyze.deduplicate([dict(f) for f in order])[0]
+        if survivor["check_id"] != answered["check_id"]:
+            failures.append(
+                f"dedupe ({label}): a registry rule outranked the secrets engine "
+                f"on the same line -- kept {survivor['check_id']}"
+            )
+        if survivor["check_id"] in survivor.get("_also_matched", []):
+            failures.append(
+                f"dedupe ({label}): the survivor lists itself in also_matched, "
+                "so the report overstates how many rules agreed"
+            )
+
+    # Tier must outrank severity, or the engine's own calibration is overridden
+    # by a scale that means something different.
+    survivor = analyze.deduplicate([
+        dict(finding("safeship.secrets.generic", "WARNING", engine="secrets")),
+        dict(finding("detected-generic-secret", "ERROR")),
+    ])[0]
+    if not survivor["check_id"].startswith("safeship.secrets"):
+        failures.append(
+            "dedupe: a registry ERROR outranked an engine WARNING; severity is "
+            "only comparable within a tier"
+        )
+
+    # A proven dataflow outranks a shape match.
+    survivor = analyze.deduplicate([
+        dict(finding("rules.vibe-js-sql-string-building", "ERROR")),
+        dict(finding("rules.taint-js-sql-injection", "ERROR", taint=True)),
+    ])[0]
+    if "taint" not in survivor["check_id"]:
+        failures.append(
+            f"dedupe: a pattern match outranked a proven dataflow -- kept "
+            f"{survivor['check_id']}"
+        )
+
+
 CHECKS = (
     ("secrets: 16 found, safe files silent", check_secrets),
+    ("dedupe keeps the engine that answered", check_dedupe_precedence),
     ("config: 22 bad, 0 good", check_config),
     ("dependencies: 9 vulnerable packages", check_dependencies),
     ("semgrep rules: 7 Python, 11 JS, 0 on both safe fixtures", check_rules),

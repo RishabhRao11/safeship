@@ -400,6 +400,58 @@ def _key_path(path):
     return os.path.normcase(os.path.abspath(path))
 
 
+# Confidence tier, reused as dedupe precedence. Same three tiers the pipeline
+# already routes on: a fact, a proven dataflow, a shape that looked suspicious.
+_TIER_ENGINE_ANSWERED = 0
+_TIER_DATAFLOW = 1
+_TIER_PATTERN = 2
+
+_ANSWERING_ENGINES = {"secrets", "dependencies", "config"}
+
+_SEVERITY_RANK = {"ERROR": 0, "WARNING": 1, "INFO": 2}
+
+
+def _survivor_rank(finding):
+    """Sort key deciding which finding survives a shared line. Lower wins.
+
+    WHY TIER BEATS SEVERITY
+        Two rules on one line are usually describing the same thing, and the
+        question is which description to keep. Severity alone could not answer
+        it: both a registry rule and the secrets engine call a leaked AWS key
+        ERROR, so the tie fell to insertion order, and Semgrep is collected
+        first. On test_targets/secrets/.env that cost four of seven credentials.
+
+        What was lost is not a label. The engine-answered finding carries the
+        redacted line, the git-exposure note, and remediation naming the actual
+        provider console. The registry finding carries a generic message and --
+        because snippet text is login-gated for unauthenticated users -- the
+        literal string "requires login" where the code should be. So the winner
+        was strictly less useful than the loser, and rated it lower too:
+        critical became high.
+
+        An engine-answered finding IS the answer for that location. A pattern
+        match is a guess about the same line. Keep the answer.
+
+    A NOTE ON COMPARING SEVERITY ACROSS ENGINES
+        Severity deliberately means different things per engine -- the secrets
+        engine downgrades on git exposure, the config engine does not. Ranking
+        by tier first means those scales are only ever compared within a tier,
+        which is the only place the comparison was ever meaningful.
+    """
+    metadata = finding.get("extra", {}).get("metadata") or {}
+    engine = finding.get("_engine") or metadata.get("engine") or "semgrep"
+
+    if engine in _ANSWERING_ENGINES:
+        tier = _TIER_ENGINE_ANSWERED
+    elif metadata.get("analysis") == "taint":
+        tier = _TIER_DATAFLOW
+    else:
+        tier = _TIER_PATTERN
+
+    severity = finding.get("extra", {}).get("severity", "INFO")
+    return (tier, _SEVERITY_RANK.get(severity, 3))
+
+
 def deduplicate(findings):
     """Collapse findings that fire on the same line into one.
 
@@ -453,14 +505,23 @@ def deduplicate(findings):
             continue
 
         kept = by_location[location]
-        kept["_also_matched"].append(finding.get("check_id", "?"))
 
-        # ERROR outranks WARNING outranks INFO. If the newcomer is more severe,
-        # promote it and demote the incumbent into the also-matched list.
-        rank = {"ERROR": 0, "WARNING": 1, "INFO": 2}
-        if rank.get(severity, 3) < rank.get(kept.get("extra", {}).get("severity"), 3):
+        # Confidence tier first, severity second. Severity alone left ties to be
+        # settled by insertion order, and Semgrep is collected first, so on
+        # test_targets/secrets/.env four of the seven credentials were reported
+        # by the registry instead of the secrets engine.
+        #
+        # The loser joins the winner's list, and only the loser. Appending the
+        # challenger unconditionally before deciding put the winner's own rule id
+        # into its own "also matched" list on every promotion, so the report said
+        # "+2 other rules here" when one other rule had matched. Rare while
+        # promotions only happened on a severity difference; routine once tier
+        # decides, which is how it surfaced.
+        if _survivor_rank(finding) < _survivor_rank(kept):
             finding["_also_matched"] = kept["_also_matched"] + [kept.get("check_id", "?")]
             by_location[location] = finding
+        else:
+            kept["_also_matched"].append(finding.get("check_id", "?"))
 
     return _merge_adjacent(by_location[key] for key in sorted(by_location))
 
