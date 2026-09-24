@@ -48,11 +48,17 @@ that must stay silent:
 | | found | false positives |
 |---|---|---|
 | `detect-secrets` 1.5.0 | 8/16 | 4 |
+| `gitleaks` 8.30.1 | 13/16 | 1 |
 | **SafeShip** | **16/16** | **0** |
 
 `detect-secrets` flagged the AWS key in `.env.example` and missed the real one in
-`.env`. It flagged two Stripe *publishable* keys, which are designed to ship, and
-missed the `sk_live_` secret key.
+`.env`. Both it and `gitleaks` flagged a Stripe *publishable* key, which is
+designed to ship. `gitleaks` missed every credential embedded in a URL —
+`postgresql://user:password@host/db` in two files — plus a GCP service account.
+
+On **13,107 files of installed third-party libraries**, code none of these tools
+was written against, the false-positive counts are `gitleaks` 220,
+`detect-secrets` 0, SafeShip 1.
 
 **Dependencies**, on 6 vulnerable PyPI and 3 vulnerable npm packages:
 
@@ -68,10 +74,13 @@ two pinned versions contradicted each other — and you get an error instead of
 findings. SafeShip reads the file and asks OSV.
 
 **Where they beat SafeShip:** `pip-audit` and `npm audit` both check
-**transitive** dependencies. SafeShip only reads what you declared. And on 13,107
-files of installed third-party libraries, `detect-secrets` reports 0 false
-positives to SafeShip's 1 — that gap used to be 0 to 20, and closing it is what
-[CLAUDE.md](CLAUDE.md) spends its longest section on.
+**transitive** dependencies — SafeShip only reads what you declared. `gitleaks`
+scans **git history**, so it finds credentials that were committed and later
+deleted; SafeShip only reads the working tree. It is also about seven times
+faster, being Go rather than Python. And `detect-secrets` reports 0 false
+positives on those 13,107 library files to SafeShip's 1 — that gap used to be
+0 to 20, and closing it is what [CLAUDE.md](CLAUDE.md) spends its longest
+section on.
 
 ## Design decisions worth knowing
 

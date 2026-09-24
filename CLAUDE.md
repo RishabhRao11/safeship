@@ -519,8 +519,8 @@ before believing it.
 
 ## Benchmarked against other tools
 
-Run 2026-09-20. Every number before this was self-generated, which is worth
-exactly as much as a fixture you wrote yourself.
+Run 2026-09-20, gitleaks added 2026-09-24. Every number before this was
+self-generated, which is worth exactly as much as a fixture you wrote yourself.
 
 **Dependencies**, on `test_targets/deps/` — 6 vulnerable PyPI, 3 npm:
 
@@ -547,25 +547,60 @@ lockfile, which had to be generated first.
 | | recall | FPs |
 |---|---|---|
 | `detect-secrets` 1.5.0 | 8/16 | 4 |
+| `gitleaks` 8.30.1 | 13/16 | 1 |
 | SafeShip | 16/16 | 0 |
 
-All four of its unique findings are false, and the inversion is almost too neat:
-it flagged `AKIAIOSFODNN7EXAMPLE` in `.env.example` and **missed the real AWS key
-in `.env`**. It also flagged both `pk_live_` publishable keys, which are designed
-to ship. It missed the `sk_live_` secret key and the Slack token entirely.
+All four of `detect-secrets`' unique findings are false, and the inversion is
+almost too neat: it flagged `AKIAIOSFODNN7EXAMPLE` in `.env.example` and
+**missed the real AWS key in `.env`**. It also flagged both `pk_live_`
+publishable keys, which are designed to ship, and missed the `sk_live_` secret
+key and the Slack token entirely.
+
+`gitleaks` is the better of the two by a wide margin, and stays silent on
+`.env.example` where `detect-secrets` does not. Its three misses are one shape:
+**credentials embedded in a URL**. `postgresql://user:PASSWORD@host/db` in both
+`.env` and `docker-compose.yml`, plus the GCP `service_account` block. Its one
+false positive is the `pk_live_` trap — same one `detect-secrets` fell into, and
+the reason that line exists.
+
+A fourth gitleaks row is not a false positive but worth knowing: its
+`generic-api-key` regex spans the newline, so the JWT on `deploy_notes.txt:14`
+is reported twice, once anchored to the prose line above it.
 
 **Secrets, on code neither tool was written for** — 13,107 files of installed
 third-party libraries. This is the run that matters, and before the filter work
 it went the other way:
 
-| | before | after |
+| | findings | all false? |
 |---|---|---|
-| `detect-secrets` | 0 | 0 |
-| SafeShip | **20** (~19 false) | **1** |
+| `detect-secrets` 1.5.0 | **0** | — |
+| `gitleaks` 8.30.1 | **220** | yes |
+| SafeShip, before the filters | **20** | 19 of 20 |
+| SafeShip, after | **1** | no — a real JWT in PyJWT's README |
 
-Losing 20–0 on the tool's own stated governing constraint is the most useful
-thing the benchmark produced. Keep re-running both halves; the corpus is just
-`site-packages`, and it grows on its own as you install things.
+Losing 20–0 to `detect-secrets` on the tool's own stated governing constraint is
+the most useful thing the benchmark produced. Keep re-running both halves; the
+corpus is just `site-packages`, and it grows on its own as you install things.
+
+**Be fair to gitleaks about that 220.** Two hundred of them come from a single
+file — `license_expression/data/scancode-licensedb-index.json`, where
+`"license_key": "gfdl-1.3-invariants-or-later"` matches `generic-api-key`.
+Excluding that one file it is 20, across 9 files, and those are also all false:
+`private_key: x25519.X25519PrivateKey` (a type annotation), `cv.gapi.CV_UINT64:
+'cv.gapi.CV_UINT64'` (an enum mapping), `Ed25519PrivateKey` (a class name),
+`key_sha256": "bb1636..."` (a test vector).
+
+Every one is the same catch-all-rule problem SafeShip had, and several are
+exactly the shapes the four filters now handle. gitleaks also ships
+`.gitleaksignore` as the intended answer, which makes a raw count less damning
+than it looks in its own workflow.
+
+**Two things gitleaks does better, stated plainly.** It scanned 516 MB in
+**9.8 seconds** against SafeShip's 70, because it is Go and we are Python. And
+its primary mode is `gitleaks git` — scanning history for credentials that were
+committed and later removed — which SafeShip does not do at all. A key deleted
+in the working tree but alive in the reflog is still leaked, and we would miss
+it entirely.
 
 ## How to work on this
 
