@@ -431,8 +431,20 @@ if __name__ == "__main__":
         sys.exit(1)
 
     with open(sys.argv[1], "r", encoding="utf-8") as handle:
-        records = json.load(handle)
+        data = json.load(handle)
+
+    # 0.3.0 changed --json from a bare list of findings to an object that also
+    # records which engines did not run. Both are accepted, so a file saved by
+    # 0.2.0 still renders -- and a new one carries its "Incomplete scan" banner
+    # through to the report instead of dropping it on the way.
+    if isinstance(data, dict):
+        records = data.get("findings", [])
+        skipped = [(s.get("engine", "?"), s.get("reason", ""))
+                   for s in (data.get("engines") or {}).get("skipped", [])]
+        notes = data.get("notes", [])
+    else:
+        records, skipped, notes = data, (), ()
 
     label = sys.argv[3] if len(sys.argv) > 3 else sys.argv[1]
-    destination = write(records, label, sys.argv[2])
+    destination = write(records, label, sys.argv[2], skipped=skipped, notes=notes)
     print(f"wrote {destination} ({len(records)} finding(s))")

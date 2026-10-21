@@ -1049,7 +1049,47 @@ def main():
         print(f"HTML report: {written}", file=sys.stderr)
 
     if args.json:
-        print(json.dumps(results, indent=2))
+        # WHY AN OBJECT AND NOT THE BARE LIST IT USED TO BE
+        #   The list carried findings and nothing else, so an engine that failed
+        #   left no trace: a submission where Semgrep could not run was
+        #   byte-for-byte the same as one with no injection bugs. A person
+        #   reading the terminal sees NOT SCANNED; a script aggregating five
+        #   hundred JSON files sees nothing, and counts the gap as clean.
+        #
+        #   That is the use --json exists for, and the first real one was a
+        #   research project counting recurring vulnerabilities across student
+        #   submissions -- where a silent gap undercounts and nobody notices.
+        #
+        #   The versions are here for the same reason. The same rules over the
+        #   same files give different counts on a different Semgrep, so a
+        #   result is only reproducible with the engine written down beside it.
+        skipped_labels = {label for label, _reason in skipped}
+        if not run_semgrep:
+            explanations = "not applicable"
+        elif explain_skipped_reason:
+            explanations = f"skipped: {explain_skipped_reason}"
+        elif args.no_explain:
+            explanations = "disabled"
+        else:
+            explanations = "claude"
+
+        print(json.dumps({
+            "safeship_version": safeship_version(),
+            "target": args.target,
+            "engines": {
+                "ran": [label for _tag, label, _produce, _failure in planned
+                        if label not in skipped_labels],
+                "skipped": [{"engine": label, "reason": reason}
+                            for label, reason in skipped],
+            },
+            "semgrep": {
+                "version": scanner.semgrep_version() if run_semgrep else None,
+                "configs": configs if run_semgrep else [],
+            },
+            "explanations": explanations,
+            "notes": notes,
+            "findings": results,
+        }, indent=2))
         return
 
     if args.no_explain:
@@ -1134,6 +1174,16 @@ def _dotenv_value(name, path=ENV_FILE):
         os.environ.pop(name, None)
         if saved is not None:
             os.environ[name] = saved
+
+
+def safeship_version():
+    """This package's own version, read from the package.json that ships with it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "package.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle).get("version", "unknown")
+    except (OSError, ValueError):
+        return "unknown"
 
 
 def resolve_api_key():

@@ -118,6 +118,37 @@ def find_semgrep():
     )
 
 
+_VERSION_CACHE = []
+
+
+def semgrep_version():
+    """The installed Semgrep version as a string, or None if it cannot be read.
+
+    Recorded in --json output because the rule counts depend on it. CI showed
+    it directly: on Python 3.9 pip resolves semgrep to ~1.136, and the same
+    rules over the same fixtures produce different numbers. A result someone
+    wants to reproduce -- a research dataset, say -- is only reproducible with
+    the engine version written down next to it.
+
+    Never raises. Semgrep being unrunnable is reported elsewhere as a skipped
+    engine; this only answers "which version", and "unknown" is an answer.
+    """
+    if _VERSION_CACHE:
+        return _VERSION_CACHE[0]
+    version = None
+    try:
+        exe, env = find_semgrep()
+        proc = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                              env=env, timeout=60)
+        lines = proc.stdout.strip().splitlines()
+        if proc.returncode == 0 and lines:
+            version = lines[0].strip()
+    except (ScannerError, OSError, subprocess.TimeoutExpired):
+        pass
+    _VERSION_CACHE.append(version)
+    return version
+
+
 def scan(target, config="auto", timeout=300):
     """Run Semgrep on `target` and return its findings as a list of dicts.
 

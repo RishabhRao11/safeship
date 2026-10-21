@@ -33,6 +33,7 @@ Exit code is 0 on pass, 1 on failure, so it drops into CI unchanged.
 
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -313,6 +314,46 @@ def check_missing_key_keeps_results(failures):
             )
 
 
+def check_json_records_skipped_engines(failures):
+    """--json must say which engines did not run, and which versions did.
+
+    Up to 0.2.0 it printed a bare list of findings. An engine that failed left
+    no trace in it, so a submission where Semgrep could not run was identical
+    to one with no injection bugs. The terminal says NOT SCANNED; a script
+    aggregating hundreds of JSON files saw nothing and counted the gap as clean.
+    The first real consumer of --json was a research project counting recurring
+    vulnerabilities across student code -- exactly where that undercounts and
+    nobody notices.
+    """
+    saved = secrets_engine.scan
+    secrets_engine.scan = explode
+    try:
+        _exit, out, _err = run_analyze([TARGET] + OFFLINE + ["--json"])
+    finally:
+        secrets_engine.scan = saved
+
+    try:
+        data = json.loads(out)
+    except ValueError:
+        failures.append("--json did not produce valid JSON")
+        return
+
+    if not isinstance(data, dict):
+        failures.append(
+            "--json is a bare list, so a failed engine leaves no trace and a "
+            "script aggregating results counts the gap as clean"
+        )
+        return
+
+    skipped = [s.get("engine") for s in (data.get("engines") or {}).get("skipped", [])]
+    if "credential scan" not in skipped:
+        failures.append(f"--json did not record the engine that failed (skipped={skipped})")
+    if data.get("safeship_version") in (None, "", "unknown"):
+        failures.append("--json does not record the SafeShip version; results cannot be reproduced")
+    if not isinstance(data.get("findings"), list):
+        failures.append("--json has no `findings` list")
+
+
 CHECKS = (
     ("scanner converts OSError into ScannerError", check_scanner_converts_oserror),
     ("an undeclared failure costs one engine only", check_undeclared_failure_keeps_other_engines),
@@ -320,6 +361,7 @@ CHECKS = (
     ("total failure is loud, not 'No findings'", check_total_failure_is_loud),
     ("the offline path runs without the anthropic SDK", check_offline_path_needs_no_sdk),
     ("no API key keeps the results and says why", check_missing_key_keeps_results),
+    ("--json records engines that did not run", check_json_records_skipped_engines),
 )
 
 
