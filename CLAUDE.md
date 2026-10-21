@@ -774,7 +774,7 @@ rather than zipping and uploading, because there is no server by design — and 
 a tool that hunts credentials, not transmitting your source is a feature.
 
 Published to npm: `safeship@0.1.0` on 2026-09-08, `0.2.0` on 2026-09-21, `0.3.0`
-prepared 2026-10-21. Each bump is a **minor**, not a patch: 0.2.0 added the taint
+on 2026-10-21. Each bump is a **minor**, not a patch: 0.2.0 added the taint
 rules, and 0.3.0 adds history and transitive scanning and changes the `--json`
 shape. `CHANGELOG.md` is the record and ships
 with the package.
