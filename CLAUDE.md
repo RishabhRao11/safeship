@@ -237,6 +237,43 @@ similar marker; each gets its own fact set. Without this, one service's
 `import helmet` in a monorepo marks the fact true and silently clears the service
 next door that has none.
 
+**No API key degrades; it never discards.** `resolve_api_key()` runs in
+`main()` *before* any engine. With no key the run falls back to `--no-explain`
+and adds a note -- in the terminal and as a neutral banner in the HTML -- saying
+how many pattern findings went unjudged. A malformed key still stops the run,
+but pre-scan, so nothing is lost.
+
+This was a real bug in 0.2.0, the published version: the key was first checked
+inside the explanation loop, after every engine had finished, and with no key it
+raised `SystemExit` before the report was written. Twenty findings found, report
+written: False. Most users have no API credits, so the *default command* was the
+broken one. Same shape as every degradation bug in this file -- a check placed
+after the work it exists to protect -- and the docstring had been promising the
+opposite the whole time. Contract 6 in `test_degradation.py`.
+
+**`--json` is an object, not a list**, since 0.3.0:
+
+```python
+{"safeship_version", "target",
+ "engines": {"ran": [...], "skipped": [{"engine", "reason"}]},
+ "semgrep": {"version", "configs"},
+ "explanations": "claude" | "disabled" | "skipped: <reason>" | "not applicable",
+ "notes": [...], "findings": [...]}
+```
+
+The bare list it replaced could not say an engine had failed, so one submission
+where Semgrep crashed was identical to one with no bugs -- harmless to a person
+reading a terminal, corrupting to a script aggregating hundreds of files. The
+first real consumer of `--json` was exactly that: a UW-Madison research project
+counting recurring vulnerabilities across student code. The versions are there
+because the same rules give different counts on a different Semgrep.
+`report.py` reads both shapes. Contract 7 in `test_degradation.py`.
+
+**`python analyze.py` alone does not run the custom rules.** `--config`
+defaults to `auto`, the online registry; `rules/` only runs when passed. The
+npx CLI always adds it. Easy to forget when demoing from the repo -- use
+`--config auto --config rules/`.
+
 **Transitive dependencies are scanned, from the lockfile.** The manifest
 records what you asked for; the lockfile records what is actually installed,
 which is usually ten times more packages. A CVE in something you never chose is
@@ -438,7 +475,7 @@ Three, all standalone, all exit 0/1:
 
 ```bash
 python test_fixtures.py          # every count in this file, plus dedupe precedence
-python test_degradation.py       # failure paths: 5 contracts, all mutation-verified
+python test_degradation.py       # failure paths: 7 contracts, all mutation-verified
                                  # (breaking every engine means every one, history included)
 python test_report_escaping.py   # the HTML report cannot be made to execute code
 ```
@@ -736,9 +773,10 @@ Item 5 (`npx safeship scan`) is done, minus publishing. It runs the scan locally
 rather than zipping and uploading, because there is no server by design — and for
 a tool that hunts credentials, not transmitting your source is a feature.
 
-Published to npm: `safeship@0.1.0` on 2026-09-08, `0.2.0` on 2026-09-21. The
-version bump is a **minor**, not a patch, because `rules/taint_flows.yaml` is new
-detection capability rather than a fix. `CHANGELOG.md` is the record and ships
+Published to npm: `safeship@0.1.0` on 2026-09-08, `0.2.0` on 2026-09-21, `0.3.0`
+prepared 2026-10-21. Each bump is a **minor**, not a patch: 0.2.0 added the taint
+rules, and 0.3.0 adds history and transitive scanning and changes the `--json`
+shape. `CHANGELOG.md` is the record and ships
 with the package.
 
 Verify a release the way the last one was verified: `npm pack`, install the

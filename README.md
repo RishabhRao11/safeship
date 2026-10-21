@@ -120,7 +120,7 @@ npx safeship doctor                   # check the toolchain is installed
 |---|---|
 | `--html <path>` | where to write the report (default `safeship-report.html`) |
 | `--no-html` | skip the report |
-| `--json` | JSON on stdout |
+| `--json` | JSON on stdout: `findings`, plus which engines ran or were skipped and the SafeShip/Semgrep versions |
 | `--secrets-only` | fastest path: offline, no API key |
 | `--no-deps` | skip the dependency check, the only engine that uses the network |
 | `--no-history` | skip the git-history sweep for deleted-but-committed keys |
@@ -137,10 +137,17 @@ is missing:
 python -m pip install -r requirements.txt
 ```
 
-An `ANTHROPIC_API_KEY` is optional. Without one, use `--no-explain` or
-`--secrets-only`; you still get every credential, dependency, and configuration
-finding. The `anthropic` package is optional on the same terms -- those paths
-run without it installed at all.
+**An Anthropic API key is optional.** Without one, the scan runs normally and
+says AI explanations were skipped: you still get every credential, dependency,
+and configuration finding, and pattern findings are listed as unconfirmed rather
+than dismissed. To turn explanations on, set an environment variable:
+
+```bash
+setx ANTHROPIC_API_KEY sk-ant-...
+```
+
+(`export ANTHROPIC_API_KEY=sk-ant-...` on macOS/Linux.) The `anthropic` package
+is optional on the same terms -- without it, scans run unexplained.
 
 ## Status
 
