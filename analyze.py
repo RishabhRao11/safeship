@@ -806,7 +806,6 @@ def main():
     # Every finding is tagged with the engine that produced it, because from here
     # on the two are treated differently: Semgrep findings go to the API for a
     # judgment call, secret findings never do.
-    print(f"Scanning {args.target} ...", file=sys.stderr)
     all_findings = []
     skipped = []  # (label, reason) for engines that could not run
 
@@ -821,6 +820,20 @@ def main():
 
     if not any((run_semgrep, run_secrets, run_config, run_deps)):
         raise SystemExit("Every engine is disabled; nothing to scan.")
+
+    # Settle the API key BEFORE any engine runs. Only Semgrep findings are ever
+    # sent to the model, so a run without Semgrep never needs one and is not
+    # asked about it. See resolve_api_key() for why this moved: it used to be
+    # discovered after the scan, and the results went with it.
+    explain_skipped_reason = None
+    if run_semgrep and not args.no_explain:
+        if not resolve_api_key():   # raises here, pre-scan, if the key is malformed
+            args.no_explain = True
+            explain_skipped_reason = "no ANTHROPIC_API_KEY is set"
+
+    # After the key check, so a malformed key is not announced with "Scanning..."
+    # a line before the run stops.
+    print(f"Scanning {args.target} ...", file=sys.stderr)
 
     # ONE ENGINE FAILING MUST NOT END THE SCAN
     #   Found by running this on real projects: Windows blocked Semgrep's native
@@ -1015,10 +1028,24 @@ def main():
         results.append(record)
 
     # --- Step 4 & 5: report -------------------------------------------------
+    # Said only when something actually went unjudged. A run whose pattern rules
+    # matched nothing lost nothing by having no key, and a notice there would be
+    # noise on the line people learn to skip.
+    notes = []
+    unjudged = [r for r in results
+                if r["explanation"].get("explained_by") == "scanner"]
+    if explain_skipped_reason and unjudged:
+        notes.append(
+            f"AI explanations were skipped because {explain_skipped_reason}. "
+            f"The {len(unjudged)} pattern finding(s) below are unconfirmed, not "
+            "dismissed -- set the ANTHROPIC_API_KEY environment variable to have "
+            "Claude judge which are actually exploitable."
+        )
+
     if args.html:
         written = report.write(results, args.target, args.html,
                                scan_count=scan_count, deduped_count=len(findings),
-                               skipped=skipped)
+                               skipped=skipped, notes=notes)
         print(f"HTML report: {written}", file=sys.stderr)
 
     if args.json:
@@ -1035,6 +1062,8 @@ def main():
             print(f"  NOT SCANNED -- {label}: {reason}")
             print("  Findings of that kind cannot appear below. "
                   "This is not a clean result.")
+        for note in notes:
+            print(f"  NOTE -- {note}")
         # Compact listing: the findings exist, but nothing has judged them.
         for record in results:
             severity = record["explanation"].get("severity", "?")
@@ -1107,14 +1136,25 @@ def _dotenv_value(name, path=ENV_FILE):
             os.environ[name] = saved
 
 
-def anthropic_client():
-    """Build the API client, failing early with a useful message if the key is unset.
+def resolve_api_key():
+    """Return the API key, "" when none is set. Raises SystemExit if malformed.
 
-    Checking here rather than on the first request means you find out before the scan
-    results are thrown away, not after waiting through a scan.
+    WHY THIS IS SEPARATE FROM anthropic_client()
+        main() calls this BEFORE any engine runs. It used to run only inside the
+        explanation loop, at the first finding that needed the model -- after
+        every engine had finished -- and with no key it raised SystemExit there,
+        before the report was written. Measured on 0.2.0: twenty findings found,
+        "ANTHROPIC_API_KEY is not set", report written: False. Most people who
+        run this have no API credits, so plain `npx safeship scan` scanned the
+        whole project and then threw the results away.
+
+        The two outcomes are now handled differently, on purpose:
+          - No key is the ordinary case. main() falls back to --no-explain and
+            says so. Nothing is lost and nobody is punished for not paying.
+          - A malformed key means someone tried to set one and got it wrong.
+            That still stops the run -- but now before scanning, so the only
+            cost is the seconds it took to read this message.
     """
-    import anthropic
-
     # Captured before load_dotenv() so we can tell "the file supplied it" from
     # "the environment already had one".
     preset = os.environ.get("ANTHROPIC_API_KEY")
@@ -1152,16 +1192,20 @@ def anthropic_client():
             "with an old value, that is what gets used."
         )
 
-    if not key:
+    return key
+
+
+def anthropic_client():
+    """Build the API client. main() has already confirmed a usable key exists."""
+    import anthropic
+
+    # Read the environment, not resolve_api_key() again: main() already loaded
+    # .env, and resolving twice prints the stale-key warning twice.
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        # Unreachable through main(), which falls back to --no-explain first.
+        # Kept so a direct caller gets a sentence rather than an auth error.
         raise SystemExit(
-            "ANTHROPIC_API_KEY is not set.\n\n"
-            f"Easiest: put it in {ENV_FILE}\n"
-            "  ANTHROPIC_API_KEY=sk-ant-...\n\n"
-            "PowerShell (this session only):\n"
-            '  $env:ANTHROPIC_API_KEY = "sk-ant-..."\n\n'
-            "PowerShell (persist for future sessions):\n"
-            '  [Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-...", "User")\n\n'
-            "Or run with --no-explain to scan without the API."
+            "ANTHROPIC_API_KEY is not set. Set it, or run with --no-explain."
         )
     return anthropic.Anthropic()
 

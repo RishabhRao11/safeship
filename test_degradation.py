@@ -36,6 +36,7 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 
 import analyze
@@ -254,12 +255,71 @@ def check_offline_path_needs_no_sdk(failures):
         )
 
 
+def check_missing_key_keeps_results(failures):
+    """Plain `npx safeship scan` with no API key must not throw the scan away.
+
+    Measured on 0.2.0, which is on npm: every engine ran, twenty findings were
+    collected, then the first Semgrep finding reached the explanation step,
+    found no key, raised SystemExit -- and the report was never written. Most
+    people who run this have no API credits, so the default command was the
+    broken one. The same shape as the degradation bugs above: a check placed
+    after the work it was supposed to protect.
+
+    Contract: no key degrades to unexplained findings, the report is written,
+    and the user is told why the AI layer is missing. Silence would read as
+    "Claude looked and found nothing".
+    """
+    def one_semgrep_finding(target, config="auto", timeout=300):
+        return [{
+            "check_id": "python.lang.security.audit.dangerous-system-call",
+            "path": os.path.abspath("test_targets/vulnerable.py"),
+            "start": {"line": 183, "col": 1}, "end": {"line": 183, "col": 2},
+            "extra": {"message": "os.system with user input", "severity": "ERROR",
+                      "lines": "os.system(cmd)", "metadata": {}},
+        }]
+
+    # A user with no key: no environment variable, and SafeShip's own local
+    # .env -- which on the maintainer's machine holds a real one -- not read.
+    saved_scan = scanner.scan
+    saved_load, saved_value = analyze.load_dotenv, analyze._dotenv_value
+    saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+    scanner.scan = one_semgrep_finding
+    analyze.load_dotenv = lambda *a, **k: None
+    analyze._dotenv_value = lambda *a, **k: None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        html = os.path.join(tmp, "report.html")
+        try:
+            # Deliberately NOT --no-explain: the default command is the point.
+            exit_exc, out, err = run_analyze(
+                [TARGET, "--no-deps", "--no-history", "--html", html])
+        finally:
+            scanner.scan = saved_scan
+            analyze.load_dotenv, analyze._dotenv_value = saved_load, saved_value
+            if saved_key is not None:
+                os.environ["ANTHROPIC_API_KEY"] = saved_key
+
+        if exit_exc is not None:
+            failures.append(
+                f"no API key ended the run ({str(exit_exc).splitlines()[0]}) -- "
+                "every engine had already finished, so the findings were lost"
+            )
+        elif not os.path.exists(html):
+            failures.append("no API key: the run finished but wrote no report")
+        elif "AI explanations were skipped" not in out:
+            failures.append(
+                "no API key: the findings were kept but nothing said the AI layer "
+                "was skipped, so unjudged findings read as checked"
+            )
+
+
 CHECKS = (
     ("scanner converts OSError into ScannerError", check_scanner_converts_oserror),
     ("an undeclared failure costs one engine only", check_undeclared_failure_keeps_other_engines),
     ("a declared failure is still handled", check_declared_failure_still_handled),
     ("total failure is loud, not 'No findings'", check_total_failure_is_loud),
     ("the offline path runs without the anthropic SDK", check_offline_path_needs_no_sdk),
+    ("no API key keeps the results and says why", check_missing_key_keeps_results),
 )
 
 
