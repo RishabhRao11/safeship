@@ -346,6 +346,56 @@ def check_history_scan(failures, skips):
             )
 
 
+def check_history_scan_finishes_on_real_history(failures, skips):
+    """A repository with real history must not hang the history scan.
+
+    0.3.0 shipped with history scanning on by default, measured at 0.74s on a
+    22-commit repo. The first real AI-built app in the real-app study had 1,819
+    commits -- Lovable commits on every AI edit -- and the scan never finished:
+    both python and git sat at zero CPU for over ten minutes.
+
+    `_read_blobs` wrote every blob id into `git cat-file --batch` before reading
+    any output. Past a pipe buffer's worth, git blocks writing blob contents
+    nobody is reading, stops reading its input, and the write blocks too. A
+    deadlock, not slowness -- and invisible on any repo small enough that
+    everything fits in the buffer, which was every fixture.
+
+    2,500 files committed then deleted is past the buffer on Windows (4 KB)
+    and Linux (64 KB) alike. Run in a subprocess with a time limit, because a
+    deadlocked check must fail rather than hang CI forever.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = os.path.join(tmp, "big")
+        os.makedirs(repo)
+        run = lambda *a: subprocess.run(["git", "-C", repo] + list(a),
+                                        capture_output=True, check=True)
+        run("init", "-q", ".")
+        run("config", "user.email", "test@example.invalid")
+        run("config", "user.name", "Fixture")
+        for n in range(2500):
+            with open(os.path.join(repo, f"f{n:04d}.txt"), "w", encoding="utf-8") as fh:
+                fh.write(f"line {n}\n" * 25)
+        run("add", "-A")
+        run("commit", "-q", "-m", "many files")
+        for n in range(2500):
+            os.remove(os.path.join(repo, f"f{n:04d}.txt"))
+        with open(os.path.join(repo, "keep.txt"), "w", encoding="utf-8") as fh:
+            fh.write("kept\n")
+        run("add", "-A")
+        run("commit", "-q", "-m", "delete them")
+
+        probe = ("import sys; sys.path.insert(0, %r); from engines import secrets; "
+                 "print(len(secrets.scan_history(%r)))" % (os.path.dirname(os.path.abspath(__file__)), repo))
+        try:
+            subprocess.run([sys.executable, "-c", probe], capture_output=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            failures.append(
+                "history: scan_history did not finish within 120s on a repo with "
+                "2,500 historical blobs -- the cat-file pipe deadlock that hung "
+                "0.3.0 on real Lovable apps"
+            )
+
+
 def check_dedupe_precedence(failures, skips):
     """A shared line is reported by whichever engine actually answered it.
 
@@ -415,6 +465,7 @@ CHECKS = (
     ("secrets: 16 found, safe files silent", check_secrets),
     ("dedupe keeps the engine that answered", check_dedupe_precedence),
     ("history: deleted credentials are still leaked", check_history_scan),
+    ("history: real-sized history does not hang", check_history_scan_finishes_on_real_history),
     ("config: 22 bad, 0 good", check_config),
     ("dependencies: 9 vulnerable packages", check_dependencies),
     ("transitive: the resolved tree, not just the manifest", check_transitive_dependencies),

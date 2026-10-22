@@ -319,8 +319,24 @@ object store, still in every clone and fork, and `git show` brings it back in on
 command.
 
 Added after benchmarking against gitleaks, whose primary mode is history
-scanning and ours was nothing. On by default, `--no-history` to skip; 0.74s
-across this repo's 22 commits, so it does not need to be opt-in.
+scanning and ours was nothing. On by default, `--no-history` to skip.
+
+**"0.74s across this repo's 22 commits" was the justification for on-by-default,
+and 22 commits was the problem.** 0.3.0 hung forever on the first real AI-built
+app it met: 1,819 commits, because Lovable commits on every AI edit. Not slow --
+deadlocked, both processes at zero CPU. `_read_blobs` wrote every blob id into
+`git cat-file --batch` before reading any output; past a pipe buffer's worth
+(4 KB on Windows, 64 KB on Linux) git blocks writing contents nobody reads,
+stops reading its input, and the write blocks too. Every fixture was small
+enough to fit in the buffer, so no test could see it. Fixed in 0.3.1 with a
+writer thread; that repo now takes 10.3s. Contract in `test_fixtures.py`: a
+repo with 2,500 committed-then-deleted files, run in a subprocess with a time
+limit, because a deadlocked check must fail rather than hang CI. Restoring the
+write-then-read order turns it red.
+
+The general lesson, and it is the fixtures lesson again at a different scale:
+*a performance claim measured on a toy is a claim about the toy.* Found by the
+real-app study before it produced a single result.
 
 Four things were wrong on the way, and all four are the kind that look fine:
 
@@ -774,7 +790,7 @@ rather than zipping and uploading, because there is no server by design — and 
 a tool that hunts credentials, not transmitting your source is a feature.
 
 Published to npm: `safeship@0.1.0` on 2026-09-08, `0.2.0` on 2026-09-21, `0.3.0`
-on 2026-10-21. Each bump is a **minor**, not a patch: 0.2.0 added the taint
+on 2026-10-21, `0.3.1` prepared 2026-10-22. Each bump is a **minor**, not a patch: 0.2.0 added the taint
 rules, and 0.3.0 adds history and transitive scanning and changes the `--json`
 shape. `CHANGELOG.md` is the record and ships
 with the package.

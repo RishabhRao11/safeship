@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 
 
@@ -625,16 +626,42 @@ def _blobs_only_in_history(root):
 
 
 def _read_blobs(root, shas):
-    """Stream blob contents via one `git cat-file --batch`, not one call each."""
+    """Stream blob contents via one `git cat-file --batch`, not one call each.
+
+    WHY THE IDS ARE WRITTEN FROM A SEPARATE THREAD
+        0.3.0 wrote every id into git's stdin, then started reading stdout. On a
+        repo with real history that deadlocks: once git has produced a pipe
+        buffer's worth of blob contents that nobody is reading, it blocks
+        writing, stops reading its input, and our write of the remaining ids
+        blocks too. Both processes then sit at zero CPU forever.
+
+        It never showed up in testing because every fixture repo was small
+        enough for everything to fit in the buffer (4 KB on Windows, 64 KB on
+        Linux). The first real AI-built app in the real-app study -- 1,819
+        commits, because Lovable commits on every AI edit -- hung for over ten
+        minutes. With history scanning on by default, that was the default
+        `npx safeship scan` on exactly the projects this tool exists for.
+
+        A writer thread feeds the ids while this thread drains the output, so
+        neither side can wait on the other.
+    """
     if not shas:
         return {}
     proc = subprocess.Popen(
         ["git", "-C", root, "cat-file", "--batch"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
+
+    def feed():
+        try:
+            proc.stdin.write(("\n".join(shas) + "\n").encode())
+            proc.stdin.close()
+        except OSError:
+            pass  # git exited early; the reader sees EOF and stops
+
+    writer = threading.Thread(target=feed, daemon=True)
+    writer.start()
     try:
-        proc.stdin.write(("\n".join(shas) + "\n").encode())
-        proc.stdin.close()
         out = {}
         for _ in shas:
             header = proc.stdout.readline()
@@ -650,6 +677,7 @@ def _read_blobs(root, shas):
                 out[sha] = payload
         return out
     finally:
+        writer.join(timeout=5)
         proc.stdout.close()
         proc.wait(timeout=60)
 

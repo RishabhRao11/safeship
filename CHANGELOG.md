@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 — 2026-10-22
+
+### Fixed
+
+**The history scan no longer hangs on real repositories.** In 0.3.0, with
+history scanning on by default, `npx safeship scan` never finished on a project
+with substantial git history. Both SafeShip and git sat idle: a pipe deadlock,
+not slowness. It never appeared in testing because every test repo was small.
+The first real AI-built app it met had 1,819 commits — Lovable commits on every
+edit — and hung for over ten minutes. The same repo now finishes its history
+scan in about ten seconds.
+
+If you are on 0.3.0, upgrade, or run with `--no-history` until you do.
+
 ## 0.3.0 — 2026-10-21
 
 Every gap found by benchmarking against gitleaks, detect-secrets, npm audit and
